@@ -1,31 +1,31 @@
-# Environment variables (secrets)
-.env
-
-# Database SQLite
-app.db
-app.db-journal
-*.sqlite
-*.sqlite3
-
-# Python bytecode & cache
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-.pytest_cache/
 
-# Virtual environment
+# Virtual Environments
 venv/
 .venv/
 env/
+ENV/
 
-# Logs
-*.log
+# Environment Variables & Secrets
+.env
+.env.local
+
+# SQLite Local Database
+*.db
+*.sqlite3
+
+# Docker local configs
+.docker/
 
 # IDE & OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
-scratch/
-.docker/
 
+# Log files & scratch scripts
+*.log
+scratch/

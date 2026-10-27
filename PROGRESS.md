@@ -1,127 +1,139 @@
 # 🚀 Checkpoint de Progresso: Auditoria Operacional de Lojas de Conveniência
 
 **Data do Checkpoint:** 27 de Outubro de 2026  
-**Status Geral:** ✅ Fase 1 (Calibração, Gamificação e Anti-Fraude) Concluída com Sucesso  
+**Status Geral:** ✅ Fase 1 (Estrutura Base, Calibração, Gamificação e Anti-Fraude) Concluída com Sucesso  
 **Servidor Backend:** FastAPI + Uvicorn ativo na porta `8000` (`http://localhost:8000`)  
-**Instância WhatsApp:** Conectada via Evolution API v2 (`conveniencia`)  
+**Instância WhatsApp:** Conectada via Evolution API v2.3.0 (`conveniencia`)  
+**Banco de Dados:** SQLite local assíncrono (`app.db`) com migrações automáticas ativas  
 
 ---
 
-## 1. 🏗️ Infraestrutura e Containers
+## 1. 🏗️ Infraestrutura e Containers (`docker-compose.yml`)
 
-- **Docker Compose Ativo (`docker-compose.yml`):**
-  - **Evolution API v2.3.0 (`evolution_api_conveniencia`):** Porta `8080`, autenticação via API Key global (`audit_lojas_secret_2026`).
-  - **PostgreSQL 15 (`postgres_evolution`):** Banco de persistência de instâncias e sessões da Evolution API na porta interna `5432`.
-  - **Redis 7.0 (`redis_evolution`):** Gerenciamento de cache e filas de mensagens na porta interna `6379`.
-- **Status do WhatsApp:**
-  - Instância `conveniencia` configurada e autenticada com sucesso.
-  - Webhook apontado para `http://host.docker.internal:8000/webhook/evolution`.
-  - Grupo de teste real amarrado à Loja 1 (`120363430718119886@g.us`).
+- **Evolution API v2.3.0 (`evolution_api_conveniencia`):**
+  - Porta `8080`, autenticação via API Key global (`AUTHENTICATION_API_KEY=audit_lojas_secret_2026`).
+  - Instância `conveniencia` conectada ao WhatsApp e sincronizada.
+  - Webhook operacional apontado para `http://host.docker.internal:8000/webhook/evolution`.
+- **PostgreSQL 15 Alpine (`evolution_postgres_conveniencia`):**
+  - Persistência das instâncias, sessões e metadados da Evolution API (porta interna `5432`).
+- **Redis 7.0 Alpine (`evolution_redis_conveniencia`):**
+  - Gerenciamento de filas de mensagens, cache de sessões e rate limit (porta interna `6379`).
 
 ---
 
 ## 2. 📱 Webhook & Mensageria WhatsApp (`main.py` e `services/evolution_service.py`)
 
 - **Filtragem de Eventos Operacionais:**
-  - Tratamento inteligente do campo `event`: eventos como `connection.update` são registrados em log e respondidos com 200 imediatamente, evitando disparos espúrios.
-  - Processamento focado em `messages.upsert`.
-- **Prevenção de Loops e Automensagens:**
-  - Verificação de `fromMe == True` para ignorar mensagens geradas pelo próprio bot.
-- **Roteamento por Grupos de Loja (`@g.us`):**
-  - Identificação de `remoteJid` terminado em `@g.us`. Mensagens fora dos grupos de lojas cadastrados são ignoradas silenciosamente.
+  - Tratamento inteligente do campo `event`: eventos do ciclo de vida como `connection.update` são processados imediatamente com HTTP 200, registrando status em log e evitando disparos espúrios.
+  - Processamento de mensagens focado no evento `messages.upsert`.
+- **Anti-Loop e Prevenção de Auto-Mensagens:**
+  - Verificação rigorosa de `key.fromMe == True` para descartar qualquer mensagem gerada pelo próprio bot.
+- **Roteamento por Grupos de Lojas (`@g.us`):**
+  - O sistema opera primariamente em grupos de WhatsApp das lojas (terminados em `@g.us`).
+  - Mensagens de grupos não cadastrados ou mensagens em chats privados (não-diretoria) são ignoradas com segurança.
+  - Grupo de teste real amarrado à Loja 1: `120363430718119886@g.us`.
 - **Trava Anti-Fraude (WhatsApp):**
-  - Inspeção de `contextInfo.isForwarded` e `forwardingScore`.
-  - Fotos encaminhadas da galeria são rejeitadas imediatamente com mensagem educativa no grupo solicitando captura direta da câmera.
+  - Inspeção dos campos `contextInfo.isForwarded` e `contextInfo.forwardingScore`.
+  - Imagens encaminhadas da galeria ou repassadas de outros grupos são **recusadas imediatamente** com feedback orientador no grupo, solicitando que o atendente tire a foto diretamente na loja.
 - **Comando Interativo `!ranking`:**
-  - Qualquer colaborador no grupo pode enviar `!ranking` para receber instantaneamente o placar das 3 lojas, o turno líder e os 3 melhores operadores.
+  - Qualquer colaborador no grupo pode enviar a mensagem `!ranking` para receber instantaneamente o placar das 3 lojas, o turno líder e os melhores operadores com formatação rica em emojis.
 
 ---
 
 ## 3. 👁️ Inteligência Artificial & Visão Computacional (`services/gemini_service.py`)
 
-- **Modelo:** Google Gemini 2.0 Flash (`gemini-2.0-flash`).
-- **Configuração de Baixa Criatividade:**
-  - `temperature=0.1` configurada para foco estrito na realidade visual física.
+- **Modelo Multimodal:** Google Gemini 2.0 Flash (`gemini-2.0-flash`).
+- **Calibração de Baixa Criatividade:**
+  - `temperature=0.1` configurada para foco estrito na realidade visual física da loja, evitando deduções ou invenções.
 - **Raciocínio Visual Obrigatório Passo a Passo (Chain of Thought):**
-  - **PASSO 1:** Extração e listagem explícita dos objetos físicos visíveis no campo preliminar `"elementos_visuais_detectados"` (ex: *cervejeira vertical Itaipava*, *cervejeira Skol*, *latas de cerveja*, *garrafas pet*).
-  - **PASSO 2:** Classificação do setor baseada unicamente nos objetos listados no Passo 1.
-- **Regra de Classificação Inegociável:**
-  - Se a imagem contiver cervejeiras, geladeiras expositoras, portas de vidro com bebidas ou freezers horizontais, o setor **OBRIGATORIAMENTE** é `"FREEZER_GELADEIRA"`. É proibido classificar como Balcão ou Caixa.
-  - `"BALCAO_CAIXA"` só é atribuído se o foco central for terminal de pagamento, monitor de PDV ou checkout.
-- **Eliminação Absoluta de Alucinações:**
-  - Proibição terminante de inventar objetos inexistentes (fios de maquininha, bobinas de papel, PDVs invisíveis).
-  - Oportunidades de melhoria derivadas exclusivamente de defeitos visíveis (frenteamento de latas, garrafas tombadas, rupturas aparentes).
-- **Salvaguarda do Parser (Safety Override):**
-  - Se a IA cometer um erro de classificação gerando Balcão/Caixa enquanto detectou bebidas ou cervejeiras, o parser intercepta, força `"FREEZER_GELADEIRA"`, expurga alucinações de checkout e regenera a mensagem para o grupo.
-- **Schema Padronizado do Retorno:**
-  ```json
-  {
-    "elementos_visuais_detectados": ["cervejeira itaipava", "cervejeira skol", "latas de cerveja", "refrigerantes pet"],
-    "setor": "FREEZER_GELADEIRA",
-    "conformidade": true,
-    "score": 8.4,
-    "pontos_positivos": ["Rótulos das cervejas e refrigerantes bem alinhados para a frente"],
-    "pontos_melhoria": ["Puxar 2 latas da grade intermediária para a borda frontal"],
-    "mensagem_whatsapp": "📸 *Setor: Freezer e Geladeiras de Bebidas*..."
-  }
-  ```
-- **Mock Determinístico Atualizado:**
-  - Calibrado com o schema visual completo e nota 8.4 para testes locais sem API Key configurada.
+  - **PASSO 1:** Extração e listagem explícita dos objetos físicos visíveis no campo preliminar `"elementos_visuais_detectados"` (ex: *'cervejeira vertical vermelha Itaipava'*, *'cervejeira amarela Skol'*, *'latas de cerveja'*, *'garrafas pet de refrigerante'*).
+  - **PASSO 2:** Classificação do setor baseada estritamente nos objetos físicos detectados no Passo 1.
+- **Regra Inegociável de Classificação de Setor:**
+  - Se a imagem contiver cervejeiras, geladeiras verticais, portas de vidro com bebidas ou freezers horizontais, o setor **OBRIGATORIAMENTE** deve ser classificado como `"FREEZER_GELADEIRA"`. É terminantemente proibido classificar como Balcão ou Caixa se houver refrigeradores ou bebidas em destaque.
+  - `"BALCAO_CAIXA"` só é admitido se o foco central for terminal de pagamento, monitor de PDV ou gaveta de checkout.
+  - Demais setores mapeados: `"GONDOLA_PRATELEIRA"`, `"ESTUFA_SALGADOS"`, `"BANHEIRO"`.
+- **Validação de Objetos Inválidos (`INVALID_OBJECT`):**
+  - Se a foto enviada não retratar um setor operacional da loja (selfies, memes, documentos, prato isolado, piso vazio ou rua), o sistema retorna `setor: "INVALID_OBJECT"`, `score: 0.0`, `conformidade: false` e não valida a auditoria no dia.
+  - Retorna mensagem orientadora solicitando foto nítida de uma área da conveniência.
+- **Eliminação de Alucinações & Safety Override:**
+  - Proibição de mencionar objetos inexistentes (fios de maquininha, bobinas de papel, cupons fiscais).
+  - Oportunidades de melhoria derivadas unicamente do que é visível (alinhamento de rótulos, puxar latas para frente, reposição de rupturas aparentes).
+  - Safety Override no parser: caso a IA retorne balcão/caixa mas os elementos detectados contenham cervejeiras/bebidas, o parser corrige o setor automaticamente para `"FREEZER_GELADEIRA"` e remove alucinações de checkout.
+- **Tom de Voz Educativo (Fase 1):**
+  - Postura de "supervisor orientador", acolhedor e incentivador. Elogia primeiro os acertos, aponta 1 a 3 melhorias construtivas e atribui nota flexível de 0 a 10.
 
 ---
 
-## 4. 🎮 Gamificação, Operadores e Gestão de Turnos (`database.py`)
+## 4. 🎮 Gamificação, Operadores e Resolução de Turnos (`database.py`)
 
 - **Resolução Automática de Turnos:**
   - `T1_MANHA`: 06:00 às 13:59
   - `T2_TARDE`: 14:00 às 21:59
   - `T3_NOITE`: 22:00 às 05:59
-- **Motor de Pontuação:**
-  - Score >= 9.0: 100 pontos base
-  - Score >= 8.0: 80 pontos base
-  - Score >= 7.0: 60 pontos base
-  - Score < 7.0: 30 pontos base
-  - **Bônus de Pontualidade:** +20 pontos se a auditoria for enviada nas primeiras 2 horas do turno.
-- **Identificação do Operador:**
-  - **Via Legenda da Foto:** Extrai automaticamente nomes após prefixos comuns (ex: `"auditoria carlos"`, `"feito por Marcos"`, `"operador: Joao"`).
-  - **Via Resposta Interativa (15 minutos):** Se a foto for enviada sem identificação, a primeira mensagem de texto enviada por um membro no grupo nos próximos 15 minutos atribui a autoria da auditoria e credita os pontos ao operador.
-- **Tabela de Operadores:**
-  - Criação da tabela `operators` com acúmulo de pontos e contagem de auditorias por loja.
-- **API de Ranking (`GET /api/ranking`):**
-  - Retorna ranking de lojas, ranking de turnos, turno líder e top operadores individuais.
+- **Motor de Gamificação e Pontuação (`calculate_audit_points`):**
+  - `Score >= 9.0`: 120 pontos (100 pontos base + 20 pontos bônus de excelência).
+  - `Score entre 7.5 e 8.9`: 90 pontos.
+  - `Score entre 6.0 e 7.4`: 60 pontos.
+  - `Score < 6.0` (mas > 0): 20 pontos (reconhecimento pelo esforço de envio).
+  - `Score <= 0` (`INVALID_OBJECT`): 0 pontos.
+  - **Bônus de Pontualidade:** +10 pontos extras se a auditoria for enviada antes das 16h45.
+- **Captura e Atribuição do Operador:**
+  - **Por Legenda da Foto:** Extrai automaticamente nomes por prefixos como *"auditoria carlos"*, *"feito por Marcos"*, *"operador: Joao"*.
+  - **Por Resposta Interativa (15 min):** Se a foto for enviada sem nome, a auditoria fica como pendente de atribuição. A primeira mensagem enviada no grupo nos próximos 15 minutos (ex: *"Carlos"*, *"Marcos T1"*) vincula o operador e credita os pontos correspondentes retroativamente.
+- **Modelo de Dados & Migrações:**
+  - Tabela `operators` vinculada às lojas com acúmulo de `total_points` e contagem de auditorias.
+  - Colunas `operator_name` e `points` integradas na tabela `audits`.
+  - Migrações automáticas via SQLite `PRAGMA` no `init_db()`.
+- **Card de WhatsApp e API de Ranking:**
+  - Endpoint `GET /api/ranking` gerando card com classificação de lojas, turno líder e Top Operadores.
 
 ---
 
 ## 5. 📸 Captura ao Vivo via PWA (`/capturar/{store_id}`)
 
-- **PWA Mobile-First:**
-  - Rota `GET /capturar/{store_id}` com interface para captura rápida em dispositivos móveis.
-- **Trava de Câmera de Hardware:**
-  - Campo `<input type="file" accept="image/*" capture="environment">` que obriga o navegador mobile a acionar diretamente o sensor da câmera traseira, impedindo o envio de fotos salvas na galeria.
-- **Integração com Operador:**
-  - Campo de texto para preenchimento do nome do operador com gravação direta dos pontos no ranking.
+- **PWA Mobile-First Responsivo:**
+  - Endpoints dedicados: `/capturar/1`, `/capturar/2`, `/capturar/3`.
+  - Visual dark mode, moderno e otimizado para celulares dos colaboradores.
+- **Trava de Sensor de Câmera de Hardware:**
+  - Utilização da diretiva HTML:
+    ```html
+    <input type="file" accept="image/*" capture="environment" id="cameraInput">
+    ```
+  - Força o sistema operacional móvel (Android / iOS) a abrir diretamente o sensor da câmera traseira, bloqueando o acesso à galeria ou arquivos pré-existentes.
+- **Identificação do Operador:**
+  - Campo de texto para o colaborador preencher o seu nome antes de disparar a foto, pontuando no ranking instantaneamente.
+- **Feedback Visual em Tempo Real:**
+  - Loading com análise do Gemini 2.0 Flash e exibição imediata do badge de conformidade, nota, pontos positivos, oportunidades de melhoria e orientações práticas.
 
 ---
 
-## 6. 🧪 Validação Automatizada e Testes
+## 6. 🧪 Validações Técnicas e Testes Automatizados
 
-- **`test_gemini_fase1.py`:**
-  - Teste 1: Prompt do sistema com Chain of Thought, regra inegociável de freezer e diretrizes anti-alucinação.
-  - Teste 2: Parse de JSON com campo `elementos_visuais_detectados` e safety override contra classificações indevidas de balcão.
-  - Teste 3: Casos extremos (escala 0-100 convertida para 0-10 e objeto inválido `INVALID_OBJECT`).
-  - Teste 4: Mock determinístico para os 5 setores sem fios ou bobinas fantasmas.
-  - **Resultado:** ✅ 100% de Sucesso (`Exit code 0`).
-- **`test_gamification.py`:**
-  - Teste 1: Resolução dos 3 turnos diários.
-  - Teste 2: Cálculo de pontos e bônus de pontualidade.
-  - Teste 3: Normalização e extração de operadores por regex.
-  - Teste 4: Fluxo de banco SQLite, atribuição em até 15 minutos e geração do Card do WhatsApp.
-  - **Resultado:** ✅ 100% de Sucesso (`Exit code 0`).
+- **Verificação Sintática e Imports:**
+  - Compilação via `py_compile` em todos os módulos Python: 100% livre de erros (`Exit code 0`).
+- **Validação de Gamificação (`test_gamification.py`):**
+  - Resolução de turnos (T1, T2, T3) testada com horários limite.
+  - Cálculo de faixas de pontos e bônus de pontualidade verificado.
+  - Normalização de nomes de operadores via regex.
+  - Atribuição de operador por resposta rápida em até 15 minutos.
+  - Geração do card de ranking do WhatsApp validada.
+  - **Status:** ✅ 100% de Sucesso.
+- **Validação de Visão Computacional (`test_gemini_fase1.py`):**
+  - Verificação de Chain of Thought no system prompt.
+  - Regra inegociável de geladeiras vs balcão/caixa.
+  - Salvaguarda do parser (safety override) contra classificações errôneas.
+  - Tratamento de `INVALID_OBJECT` com score 0.0.
+  - Mocks determinísticos sem alucinações de fios e bobinas.
+  - **Status:** ✅ 100% de Sucesso.
+- **Integridade da Base de Dados (`app.db`):**
+  - Tabelas ativas: `stores` (3 lojas configuradas), `audits`, `alerts`, `operators`.
+  - Migrações automáticas de schema preservadas e funcionais.
 
 ---
 
-## 7. 🎯 Próximos Passos Recomendados
+## 7. 🎯 Estado para Retomada dos Testes Práticos
 
-1. Configurar `GEMINI_API_KEY` real no `.env` para validação ao vivo com fotografias reais das lojas.
-2. Iniciar testes ponta a ponta com a equipe de loja no grupo de WhatsApp oficial.
-3. Acompanhar a evolução do ranking semanal e os relatórios automáticos para a diretoria.
+O ambiente está totalmente preparado e estável para a continuidade dos testes operacionais:
+1. O servidor FastAPI está em execução via Uvicorn na porta `8000`.
+2. A Evolution API v2 está ativa na porta `8080` com o WhatsApp conectado e webhook funcional.
+3. Para testes de campo com fotos reais de lojas, basta inserir a chave `GEMINI_API_KEY` no arquivo `.env` ou utilizar o mock calibrado existente.
