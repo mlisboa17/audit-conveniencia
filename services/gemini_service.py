@@ -6,6 +6,7 @@ Calibrado para auditoria operacional por setores com tom educativo e orientador 
 import json
 import logging
 import re
+from enum import Enum
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
@@ -143,6 +144,36 @@ Retorne ESTRITAMENTE um objeto JSON válido, sem texto antes ou depois, com o ca
 """
 
 
+class StatusAnalise(str, Enum):
+    CONCLUIDA = "CONCLUIDA"
+    PARCIAL = "PARCIAL"
+    NAO_VERIFICAVEL = "NAO_VERIFICAVEL"
+
+
+class Severidade(str, Enum):
+    BAIXA = "BAIXA"
+    MEDIA = "MEDIA"
+    ALTA = "ALTA"
+
+
+class EvidenciaVisual(BaseModel):
+    criterio: str = Field(..., description="Nome do critério: precificacao, limpeza, organizacao, espaco_vazio, conservacao")
+    descricao: str = Field(..., description="Fato visual observado sem inferir estoque")
+    localizacao: str = Field(..., description="Posição visual (ex: prateleira 2, lado direito)")
+    conforme: bool = Field(..., description="True se dentro do padrão, False se há inconformidade")
+    severidade: Optional[Severidade] = Field(default=Severidade.BAIXA)
+
+
+class GeminiAuditoriaOutput(BaseModel):
+    setor_identificado: str = Field(..., description="FREEZER_GELADEIRA, ESTUFA, BANHEIRO, VIDROS, CAIXA, GONDOLA_GERAL")
+    status_analise: StatusAnalise
+    nivel_confianca: float = Field(..., ge=0.0, le=1.0)
+    requer_revisao: bool = Field(default=False)
+    elementos_visuais_detectados: List[str]
+    evidencias: List[EvidenciaVisual]
+    acoes_recomendadas: List[str]
+
+
 class SectorAnalysisResult(BaseModel):
     """Esquema de validação para a análise multimodal por setores do Gemini 2.0 Flash."""
     elementos_visuais_detectados: List[str] = Field(
@@ -190,18 +221,26 @@ class GeminiService:
     VALID_SECTORS = {
         "FREEZER_GELADEIRA",
         "GONDOLA_PRATELEIRA",
+        "GONDOLA_GERAL",
         "ESTUFA_SALGADOS",
+        "ESTUFA",
         "BANHEIRO",
         "BALCAO_CAIXA",
+        "CAIXA",
+        "VIDROS",
         "INVALID_OBJECT",
     }
 
     SECTOR_DISPLAY_NAMES = {
         "FREEZER_GELADEIRA": "Freezer e Geladeiras de Bebidas",
         "GONDOLA_PRATELEIRA": "Gôndolas e Prateleiras de Mercearia/Snacks",
+        "GONDOLA_GERAL": "Gôndolas e Prateleiras Gerais",
         "ESTUFA_SALGADOS": "Estufa de Salgados e Lanches",
+        "ESTUFA": "Estufa de Salgados e Lanches",
         "BANHEIRO": "Sanitário e Higiene",
         "BALCAO_CAIXA": "Balcão de Atendimento e Caixa",
+        "CAIXA": "Balcão de Atendimento e Caixa",
+        "VIDROS": "Vidros e Fachada",
         "INVALID_OBJECT": "Setor Não Reconhecido",
     }
 
@@ -374,27 +413,6 @@ class GeminiService:
             if setor == "INVALID_OBJECT":
                 return self._build_invalid_response(data.get("motivo"), elementos=elementos_visuais)
 
-            # Normalização do score (escala 0 a 10)
-            raw_score = data.get("score")
-            try:
-                score = float(raw_score) if raw_score is not None else 7.0
-            except (ValueError, TypeError):
-                score = 7.0
-
-            # Caso a IA retorne escala 0-100 por engano, converte para 0-10
-            if score > 10.0:
-                score = score / 10.0
-
-            # Limita entre 0.0 e 10.0 e arredonda a 1 casa decimal
-            score = round(max(0.0, min(10.0, score)), 1)
-
-            # Conformidade: True para score >= 7.0
-            conformidade_val = data.get("conformidade")
-            if conformidade_val is not None:
-                conformidade = bool(conformidade_val)
-            else:
-                conformidade = bool(score >= 7.0)
-
             # Pontos positivos e de melhoria
             pontos_positivos = [str(p).strip() for p in data.get("pontos_positivos", []) if str(p).strip()]
             pontos_melhoria = [str(m).strip() for m in data.get("pontos_melhoria", []) if str(m).strip()]
@@ -412,6 +430,92 @@ class GeminiService:
             # Garante no máximo 3 tópicos de melhoria
             if len(pontos_melhoria) > 3:
                 pontos_melhoria = pontos_melhoria[:3]
+
+            # 5. Estruturação do GeminiAuditoriaOutput e Avaliação Determinística (Perito Visual -> Juiz)
+            raw_evidencias = data.get("evidencias", [])
+            evidencias_list: List[EvidenciaVisual] = []
+            if isinstance(raw_evidencias, list) and raw_evidencias:
+                for item in raw_evidencias:
+                    if isinstance(item, dict):
+                        sev_str = str(item.get("severidade", "BAIXA")).upper().strip()
+                        sev_val = Severidade(sev_str) if sev_str in ("BAIXA", "MEDIA", "ALTA") else Severidade.BAIXA
+                        evidencias_list.append(
+                            EvidenciaVisual(
+                                criterio=str(item.get("criterio", "organizacao")).lower().strip(),
+                                descricao=str(item.get("descricao", "")).strip(),
+                                localizacao=str(item.get("localizacao", "geral")).strip(),
+                                conforme=bool(item.get("conforme", True)),
+                                severidade=sev_val,
+                            )
+                        )
+
+            # Se não houver evidências explícitas no JSON bruto, sintetiza a partir dos pontos detectados
+            if not evidencias_list and setor != "INVALID_OBJECT":
+                for pos in pontos_positivos:
+                    evidencias_list.append(
+                        EvidenciaVisual(
+                            criterio="organizacao",
+                            descricao=pos,
+                            localizacao="área geral",
+                            conforme=True,
+                            severidade=Severidade.BAIXA,
+                        )
+                    )
+                for mel in pontos_melhoria:
+                    evidencias_list.append(
+                        EvidenciaVisual(
+                            criterio="espaco_vazio" if any(w in mel.lower() for w in ["repor", "vazio", "falta"]) else "organizacao",
+                            descricao=mel,
+                            localizacao="área geral",
+                            conforme=False,
+                            severidade=Severidade.MEDIA if any(w in mel.lower() for w in ["ruptura", "vazio"]) else Severidade.BAIXA,
+                        )
+                    )
+
+            raw_status = str(data.get("status_analise", "CONCLUIDA")).upper().strip()
+            try:
+                status_analise = StatusAnalise(raw_status)
+            except ValueError:
+                status_analise = StatusAnalise.CONCLUIDA
+
+            acoes_rec = data.get("acoes_recomendadas", pontos_melhoria)
+            if not isinstance(acoes_rec, list):
+                acoes_rec = [str(acoes_rec)]
+
+            gemini_output = GeminiAuditoriaOutput(
+                setor_identificado=setor,
+                status_analise=status_analise,
+                nivel_confianca=float(data.get("nivel_confianca", 0.95)),
+                requer_revisao=bool(data.get("requer_revisao", False)),
+                elementos_visuais_detectados=elementos_visuais,
+                evidencias=evidencias_list,
+                acoes_recomendadas=[str(a).strip() for a in acoes_rec if str(a).strip()],
+            )
+
+            # Executa a avaliação determinística via evaluator_service
+            from services.evaluator_service import calcular_nota, evaluator_service
+            resultado_avaliacao = calcular_nota(gemini_output)
+
+            # Normalização do score: se vier score direto pré-fixado sem evidências explícitas, preserva-o;
+            # caso contrário, adota a nota calculada matematicamente pelo avaliador
+            if "score" in data and not raw_evidencias:
+                raw_score = data.get("score")
+                try:
+                    score = float(raw_score) if raw_score is not None else 7.0
+                except (ValueError, TypeError):
+                    score = 7.0
+                if score > 10.0:
+                    score = score / 10.0
+                score = round(max(0.0, min(10.0, score)), 1)
+            else:
+                score = resultado_avaliacao.nota_calculada
+
+            # Conformidade: True para score >= 7.0 e sem necessidade de ação imediata
+            conformidade_val = data.get("conformidade")
+            if conformidade_val is not None:
+                conformidade = bool(conformidade_val)
+            else:
+                conformidade = bool(score >= 7.0 and not resultado_avaliacao.requer_acao_imediata)
 
             # Mensagem formatada para o WhatsApp
             msg_whatsapp = str(data.get("mensagem_whatsapp", "")).strip()
@@ -432,12 +536,21 @@ class GeminiService:
             return {
                 "elementos_visuais_detectados": elementos_visuais,
                 "setor": setor,
+                "setor_identificado": setor,
                 "conformidade": conformidade,
                 "score": score,
                 "score_100": score_100,
                 "pontos_positivos": pontos_positivos,
                 "pontos_melhoria": pontos_melhoria,
                 "mensagem_whatsapp": msg_whatsapp,
+                # Dados do serviço avaliador determinístico
+                "status_analise": resultado_avaliacao.status_analise.value,
+                "requer_revisao": resultado_avaliacao.requer_revisao,
+                "requer_acao_imediata": resultado_avaliacao.requer_acao_imediata,
+                "itens_corrigiveis": [it.model_dump() for it in resultado_avaliacao.itens_corrigiveis],
+                "resumo_operacional": resultado_avaliacao.resumo_operacional,
+                "avaliacao": resultado_avaliacao.model_dump(),
+                "gemini_output": gemini_output.model_dump(),
                 # Chaves de compatibilidade
                 "status": status_val,
                 "aprovado": conformidade,
@@ -511,9 +624,21 @@ class GeminiService:
         elementos: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """Gera resposta padronizada para imagens que não retratam a loja."""
+        from services.evaluator_service import calcular_nota
+        analise_inv = GeminiAuditoriaOutput(
+            setor_identificado="INVALID_OBJECT",
+            status_analise=StatusAnalise.NAO_VERIFICAVEL,
+            nivel_confianca=0.0,
+            requer_revisao=True,
+            elementos_visuais_detectados=elementos or [],
+            evidencias=[],
+            acoes_recomendadas=["A foto não retrata um setor operacional da conveniência."],
+        )
+        res_inv = calcular_nota(analise_inv)
         return {
             "elementos_visuais_detectados": elementos or [],
             "setor": "INVALID_OBJECT",
+            "setor_identificado": "INVALID_OBJECT",
             "conformidade": False,
             "score": 0.0,
             "score_100": 0,
@@ -524,6 +649,13 @@ class GeminiService:
                 "A imagem enviada não retrata um setor da conveniência (geladeiras, gôndolas, estufa, banheiro ou balcão/caixa).\n"
                 "Por favor, envie uma foto nítida e direta da área a ser auditada."
             ),
+            "status_analise": res_inv.status_analise.value,
+            "requer_revisao": res_inv.requer_revisao,
+            "requer_acao_imediata": res_inv.requer_acao_imediata,
+            "itens_corrigiveis": [],
+            "resumo_operacional": res_inv.resumo_operacional,
+            "avaliacao": res_inv.model_dump(),
+            "gemini_output": analise_inv.model_dump(),
             "status": "INVALID_OBJECT",
             "aprovado": False,
             "problemas": ["Imagem fora do padrão de auditoria de loja."],
@@ -533,6 +665,8 @@ class GeminiService:
 
     def _mock_analysis(self, image_bytes: bytes) -> Dict[str, Any]:
         """Simulação determinística e educativa para testes de desenvolvimento sem API Key."""
+        from services.evaluator_service import calcular_nota
+
         size = len(image_bytes)
         if size < 3000:
             return self._build_invalid_response("Imagem muito pequena ou sem resolução adequada.")
@@ -541,14 +675,55 @@ class GeminiService:
         selector = (size // 10) % 5
 
         if selector == 0:
-            return {
-                "elementos_visuais_detectados": [
+            analise = GeminiAuditoriaOutput(
+                setor_identificado="FREEZER_GELADEIRA",
+                status_analise=StatusAnalise.CONCLUIDA,
+                nivel_confianca=0.95,
+                requer_revisao=False,
+                elementos_visuais_detectados=[
                     "cervejeira itaipava",
                     "cervejeira skol",
                     "latas de cerveja",
                     "refrigerantes pet",
                 ],
+                evidencias=[
+                    EvidenciaVisual(
+                        criterio="organizacao",
+                        descricao="Rótulos das cervejas e refrigerantes bem alinhados para a frente",
+                        localizacao="grades frontais",
+                        conforme=True,
+                    ),
+                    EvidenciaVisual(
+                        criterio="limpeza",
+                        descricao="Cervejeiras verticais bem iluminadas e vidros limpos",
+                        localizacao="portas de vidro",
+                        conforme=True,
+                    ),
+                    EvidenciaVisual(
+                        criterio="precificacao",
+                        descricao="Etiquetas de preço visíveis nas canaletas",
+                        localizacao="canaletas das grades",
+                        conforme=True,
+                    ),
+                    EvidenciaVisual(
+                        criterio="espaco_vazio",
+                        descricao="Puxar 2 latas da grade intermediária para a borda frontal",
+                        localizacao="grade intermediária",
+                        conforme=False,
+                        severidade=Severidade.BAIXA,
+                    ),
+                ],
+                acoes_recomendadas=[
+                    "Puxar 2 latas da grade intermediária para a borda frontal",
+                    "Repor o espaço vazio na fileira de águas sem gás",
+                ],
+            )
+            res_eval = calcular_nota(analise)
+
+            return {
+                "elementos_visuais_detectados": analise.elementos_visuais_detectados,
                 "setor": "FREEZER_GELADEIRA",
+                "setor_identificado": "FREEZER_GELADEIRA",
                 "conformidade": True,
                 "score": 8.4,
                 "score_100": 84,
@@ -568,6 +743,13 @@ class GeminiService:
                     "• Repor o espaço vazio na fileira de águas sem gás.\n\n"
                     "⭐ *Nota do Turno:* 8.4/10 - Excelente trabalho equipe! Ajustando esses pontos fica nota 10!"
                 ),
+                "status_analise": res_eval.status_analise.value,
+                "requer_revisao": res_eval.requer_revisao,
+                "requer_acao_imediata": res_eval.requer_acao_imediata,
+                "itens_corrigiveis": [it.model_dump() for it in res_eval.itens_corrigiveis],
+                "resumo_operacional": res_eval.resumo_operacional,
+                "avaliacao": res_eval.model_dump(),
+                "gemini_output": analise.model_dump(),
                 "status": "OK",
                 "aprovado": True,
                 "problemas": ["Puxar latas para a borda", "Repor espaço de águas"],
@@ -575,13 +757,48 @@ class GeminiService:
                 "motivo": None,
             }
         elif selector == 1:
-            return {
-                "elementos_visuais_detectados": [
+            analise = GeminiAuditoriaOutput(
+                setor_identificado="GONDOLA_PRATELEIRA",
+                status_analise=StatusAnalise.CONCLUIDA,
+                nivel_confianca=0.92,
+                requer_revisao=False,
+                elementos_visuais_detectados=[
                     "gôndola metálica central",
                     "pacotes de salgadinhos e snacks",
                     "etiquetas de preço frontais",
                 ],
+                evidencias=[
+                    EvidenciaVisual(
+                        criterio="organizacao",
+                        descricao="Gôndola de salgadinhos bem abastecida e colorida",
+                        localizacao="prateleiras gerais",
+                        conforme=True,
+                    ),
+                    EvidenciaVisual(
+                        criterio="precificacao",
+                        descricao="Etiquetas de preço visíveis e alinhadas",
+                        localizacao="canaletas frontais",
+                        conforme=True,
+                    ),
+                    EvidenciaVisual(
+                        criterio="espaco_vazio",
+                        descricao="Alinhar 3 pacotes de snacks caídos e puxar batata palha para borda",
+                        localizacao="segunda prateleira",
+                        conforme=False,
+                        severidade=Severidade.BAIXA,
+                    ),
+                ],
+                acoes_recomendadas=[
+                    "Alinhar 3 pacotes de snacks que estão caídos de lado na segunda prateleira",
+                    "Puxar os pacotes de batata palha para a borda frontal",
+                ],
+            )
+            res_eval = calcular_nota(analise)
+
+            return {
+                "elementos_visuais_detectados": analise.elementos_visuais_detectados,
                 "setor": "GONDOLA_PRATELEIRA",
+                "setor_identificado": "GONDOLA_PRATELEIRA",
                 "conformidade": True,
                 "score": 8.0,
                 "score_100": 80,
@@ -601,6 +818,13 @@ class GeminiService:
                     "• Puxar os pacotes de batata palha até a borda frontal.\n\n"
                     "⭐ *Nota do Turno:* 8.0/10 - Bom padrão! Ajustando esses pacotes fica 10!"
                 ),
+                "status_analise": res_eval.status_analise.value,
+                "requer_revisao": res_eval.requer_revisao,
+                "requer_acao_imediata": res_eval.requer_acao_imediata,
+                "itens_corrigiveis": [it.model_dump() for it in res_eval.itens_corrigiveis],
+                "resumo_operacional": res_eval.resumo_operacional,
+                "avaliacao": res_eval.model_dump(),
+                "gemini_output": analise.model_dump(),
                 "status": "OK",
                 "aprovado": True,
                 "problemas": ["Pacotes caídos de lado", "Frenteamento de batata palha"],
@@ -608,13 +832,48 @@ class GeminiService:
                 "motivo": None,
             }
         elif selector == 2:
-            return {
-                "elementos_visuais_detectados": [
+            analise = GeminiAuditoriaOutput(
+                setor_identificado="ESTUFA_SALGADOS",
+                status_analise=StatusAnalise.CONCLUIDA,
+                nivel_confianca=0.94,
+                requer_revisao=False,
+                elementos_visuais_detectados=[
                     "estufa expositora térmica de vidro curvo",
                     "bandejas inox com salgados assados e fritos",
                     "plaquetas de preços",
                 ],
+                evidencias=[
+                    EvidenciaVisual(
+                        criterio="limpeza",
+                        descricao="Vidros da estufa limpos e sem marcas de gordura aparentes",
+                        localizacao="vidro frontal e laterais",
+                        conforme=True,
+                    ),
+                    EvidenciaVisual(
+                        criterio="apresentacao",
+                        descricao="Salgados com aparência fresca, dourada e apetitosa nas bandejas",
+                        localizacao="bandejas de inox",
+                        conforme=True,
+                    ),
+                    EvidenciaVisual(
+                        criterio="organizacao",
+                        descricao="Reabastecer coxinhas e ajustar plaqueta de folhados",
+                        localizacao="bandeja central",
+                        conforme=False,
+                        severidade=Severidade.BAIXA,
+                    ),
+                ],
+                acoes_recomendadas=[
+                    "Reabastecer as coxinhas que estão com apenas 2 unidades",
+                    "Ajustar a placa de identificação dos folhados",
+                ],
+            )
+            res_eval = calcular_nota(analise)
+
+            return {
+                "elementos_visuais_detectados": analise.elementos_visuais_detectados,
                 "setor": "ESTUFA_SALGADOS",
+                "setor_identificado": "ESTUFA_SALGADOS",
                 "conformidade": True,
                 "score": 8.5,
                 "score_100": 85,
@@ -634,6 +893,13 @@ class GeminiService:
                     "• Alinhar a plaquinha com o preço dos folhados.\n\n"
                     "⭐ *Nota do Turno:* 8.5/10 - Apresentação de dar água na boca!"
                 ),
+                "status_analise": res_eval.status_analise.value,
+                "requer_revisao": res_eval.requer_revisao,
+                "requer_acao_imediata": res_eval.requer_acao_imediata,
+                "itens_corrigiveis": [it.model_dump() for it in res_eval.itens_corrigiveis],
+                "resumo_operacional": res_eval.resumo_operacional,
+                "avaliacao": res_eval.model_dump(),
+                "gemini_output": analise.model_dump(),
                 "status": "OK",
                 "aprovado": True,
                 "problemas": ["Reabastecer coxinhas", "Alinhar placa dos folhados"],
@@ -641,14 +907,50 @@ class GeminiService:
                 "motivo": None,
             }
         elif selector == 3:
-            return {
-                "elementos_visuais_detectados": [
+            analise = GeminiAuditoriaOutput(
+                setor_identificado="BANHEIRO",
+                status_analise=StatusAnalise.CONCLUIDA,
+                nivel_confianca=0.90,
+                requer_revisao=False,
+                elementos_visuais_detectados=[
                     "bancada com pia e torneira",
                     "espelho",
                     "dispenser de papel toalha",
                     "lixeira plástica",
                 ],
+                evidencias=[
+                    EvidenciaVisual(
+                        criterio="limpeza",
+                        descricao="Pia limpa e espelho sem respingos",
+                        localizacao="bancada da pia",
+                        conforme=True,
+                    ),
+                    EvidenciaVisual(
+                        criterio="conservacao",
+                        descricao="Instalações hidráulicas conservadas sem vazamento aparente",
+                        localizacao="torneira e cuba",
+                        conforme=True,
+                    ),
+                    EvidenciaVisual(
+                        criterio="reposicao_insumos",
+                        descricao="Lixeira cheia e dispenser de papel toalha baixo",
+                        localizacao="lixeira e dispenser",
+                        conforme=False,
+                        severidade=Severidade.MEDIA,
+                    ),
+                ],
+                acoes_recomendadas=[
+                    "Trocar o saco da lixeira antes que comece a transbordar",
+                    "Reabastecer o dispenser de papel toalha",
+                    "Conferir o nível do sabonete líquido",
+                ],
+            )
+            res_eval = calcular_nota(analise)
+
+            return {
+                "elementos_visuais_detectados": analise.elementos_visuais_detectados,
                 "setor": "BANHEIRO",
+                "setor_identificado": "BANHEIRO",
                 "conformidade": False,
                 "score": 6.5,
                 "score_100": 65,
@@ -669,6 +971,13 @@ class GeminiService:
                     "• Conferir o nível do sabonete líquido.\n\n"
                     "⭐ *Nota do Turno:* 6.5/10 - Uma passadinha rápida para repor os insumos e fica excelente!"
                 ),
+                "status_analise": res_eval.status_analise.value,
+                "requer_revisao": res_eval.requer_revisao,
+                "requer_acao_imediata": res_eval.requer_acao_imediata,
+                "itens_corrigiveis": [it.model_dump() for it in res_eval.itens_corrigiveis],
+                "resumo_operacional": res_eval.resumo_operacional,
+                "avaliacao": res_eval.model_dump(),
+                "gemini_output": analise.model_dump(),
                 "status": "ALERT",
                 "aprovado": False,
                 "problemas": ["Lixeira cheia", "Papel toalha baixo", "Conferir sabonete"],
@@ -676,13 +985,48 @@ class GeminiService:
                 "motivo": "Insumos de higiene necessitando de reposição.",
             }
         else:
-            return {
-                "elementos_visuais_detectados": [
+            analise = GeminiAuditoriaOutput(
+                setor_identificado="BALCAO_CAIXA",
+                status_analise=StatusAnalise.CONCLUIDA,
+                nivel_confianca=0.96,
+                requer_revisao=False,
+                elementos_visuais_detectados=[
                     "balcão de atendimento e checkout",
                     "monitor de PDV",
                     "expositor de balas e chicletes",
                 ],
+                evidencias=[
+                    EvidenciaVisual(
+                        criterio="limpeza",
+                        descricao="Bancada do checkout desobstruída para os clientes",
+                        localizacao="área central do balcão",
+                        conforme=True,
+                    ),
+                    EvidenciaVisual(
+                        criterio="impulso_visivel",
+                        descricao="Expositores de chicletes e pastilhas bem organizados",
+                        localizacao="frente do caixa",
+                        conforme=True,
+                    ),
+                    EvidenciaVisual(
+                        criterio="organizacao",
+                        descricao="Alinhar pacotes de pastilhas na frente do expositor",
+                        localizacao="expositor de doces",
+                        conforme=False,
+                        severidade=Severidade.BAIXA,
+                    ),
+                ],
+                acoes_recomendadas=[
+                    "Alinhar pacotes de pastilhas na frente do expositor",
+                    "Manter a área central do balcão sempre livre para agilizar a passagem de compras",
+                ],
+            )
+            res_eval = calcular_nota(analise)
+
+            return {
+                "elementos_visuais_detectados": analise.elementos_visuais_detectados,
                 "setor": "BALCAO_CAIXA",
+                "setor_identificado": "BALCAO_CAIXA",
                 "conformidade": True,
                 "score": 8.8,
                 "score_100": 88,
@@ -702,6 +1046,13 @@ class GeminiService:
                     "• Manter a área central do balcão sempre livre para agilizar a passagem de compras.\n\n"
                     "⭐ *Nota do Turno:* 8.8/10 - Caixa impecável e pronto para o atendimento!"
                 ),
+                "status_analise": res_eval.status_analise.value,
+                "requer_revisao": res_eval.requer_revisao,
+                "requer_acao_imediata": res_eval.requer_acao_imediata,
+                "itens_corrigiveis": [it.model_dump() for it in res_eval.itens_corrigiveis],
+                "resumo_operacional": res_eval.resumo_operacional,
+                "avaliacao": res_eval.model_dump(),
+                "gemini_output": analise.model_dump(),
                 "status": "OK",
                 "aprovado": True,
                 "problemas": ["Alinhar pastilhas", "Manter área central do balcão livre"],

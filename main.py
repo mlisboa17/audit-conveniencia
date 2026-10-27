@@ -357,6 +357,17 @@ async def evolution_webhook(
     orientacao = analysis.get("orientacao", "")
     motivo = analysis.get("motivo", "")
 
+    # Log detalhado do serviço avaliador determinístico (Perito Visual -> Juiz)
+    avaliacao = analysis.get("avaliacao")
+    if avaliacao:
+        logger.info(
+            f"[Evaluator] Avaliação determinística: Setor={avaliacao.get('setor')} | "
+            f"Nota={avaliacao.get('nota_calculada')} | "
+            f"Conformes={avaliacao.get('criterios_conformes')}/{avaliacao.get('total_criterios_avaliados')} | "
+            f"Ação Imediata={avaliacao.get('requer_acao_imediata')} | "
+            f"Itens Corrigíveis={len(avaliacao.get('itens_corrigiveis', []))}"
+        )
+
     # Validação Estrita de Objeto e Ambiente
     if analysis_status == "INVALID_OBJECT":
         logger.warning(
@@ -823,6 +834,17 @@ async def upload_auditoria_live(
     orientacao = analysis.get("orientacao", "")
     motivo = analysis.get("motivo", "")
 
+    # Log detalhado do serviço avaliador determinístico
+    avaliacao = analysis.get("avaliacao")
+    if avaliacao:
+        logger.info(
+            f"[PWA Evaluator] Avaliação determinística: Setor={avaliacao.get('setor')} | "
+            f"Nota={avaliacao.get('nota_calculada')} | "
+            f"Conformes={avaliacao.get('criterios_conformes')}/{avaliacao.get('total_criterios_avaliados')} | "
+            f"Ação Imediata={avaliacao.get('requer_acao_imediata')} | "
+            f"Itens Corrigíveis={len(avaliacao.get('itens_corrigiveis', []))}"
+        )
+
     # Define o turno dinamicamente via resolve_shift
     now = datetime.now()
     current_shift = resolve_shift(now)
@@ -851,6 +873,10 @@ async def upload_auditoria_live(
             "motivo": motivo,
             "problemas": problemas,
             "orientacao": orientacao,
+            "avaliacao": avaliacao,
+            "resumo_operacional": analysis.get("resumo_operacional"),
+            "itens_corrigiveis": analysis.get("itens_corrigiveis", []),
+            "requer_acao_imediata": analysis.get("requer_acao_imediata", True),
         }
 
     # Cálculo de pontos e gamificação
@@ -928,6 +954,10 @@ async def upload_auditoria_live(
         "problemas": problemas,
         "orientacao": orientacao,
         "audit_id": audit_record.id,
+        "avaliacao": avaliacao,
+        "resumo_operacional": analysis.get("resumo_operacional"),
+        "itens_corrigiveis": analysis.get("itens_corrigiveis", []),
+        "requer_acao_imediata": analysis.get("requer_acao_imediata", False),
     }
 
 

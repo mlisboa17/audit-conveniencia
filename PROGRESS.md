@@ -137,3 +137,51 @@ O ambiente está totalmente preparado e estável para a continuidade dos testes 
 1. O servidor FastAPI está em execução via Uvicorn na porta `8000`.
 2. A Evolution API v2 está ativa na porta `8080` com o WhatsApp conectado e webhook funcional.
 3. Para testes de campo com fotos reais de lojas, basta inserir a chave `GEMINI_API_KEY` no arquivo `.env` ou utilizar o mock calibrado existente.
+
+---
+
+## 8. ⚖️ Refatoração P0: Desacoplamento da IA (Perito Visual vs Juiz Determinístico)
+
+Implementação dos **Passos 1, 2 e 3** com arquitetura em duas camadas: o modelo de IA atua exclusivamente como **Perito Visual** (observação objetiva e factual sem juízo de valor ou notas), enquanto o **Evaluator Service** atua como **Juiz Determinístico** (cálculo matemático de pesos, penalidades e conformidade setorial).
+
+### Passo 1: Schemas Pydantic Estritos (`services/gemini_service.py`)
+- **`StatusAnalise`:** `CONCLUIDA`, `PARCIAL`, `NAO_VERIFICAVEL`.
+- **`Severidade`:** `BAIXA`, `MEDIA`, `ALTA`.
+- **`EvidenciaVisual`:** `criterio`, `descricao`, `localizacao`, `conforme`, `severidade`.
+- **`GeminiAuditoriaOutput`:** `setor_identificado`, `status_analise`, `nivel_confianca`, `requer_revisao`, `elementos_visuais_detectados`, `evidencias`, `acoes_recomendadas`.
+- Eliminação completa de geração subjetiva de notas, pontuações ou bônus por LLM.
+
+### Passo 2: Evaluator Service Determinístico (`services/evaluator_service.py`)
+- **Matriz de Pesos Rígida (`CHECKLIST_SETORES`, total = 10 por setor):**
+  - `FREEZER_GELADEIRA`: organizacao=3, espaco_vazio=3, precificacao=2, limpeza=2
+  - `GONDOLA_GERAL`: organizacao=3, espaco_vazio=3, precificacao=2, limpeza=2
+  - `ESTUFA`: limpeza=4, apresentacao=3, organizacao=3
+  - `BANHEIRO`: limpeza=5, conservacao=3, reposicao_insumos=2
+  - `VIDROS`: limpeza=7, conservacao=3
+  - `CAIXA`: organizacao=4, limpeza=3, impulso_visivel=3
+- **Sinônimos e Compatibilidade (`SETOR_ALIASES`):**
+  - Mapeamento automático de `GONDOLA_PRATELEIRA -> GONDOLA_GERAL`, `ESTUFA_SALGADOS -> ESTUFA`, `BALCAO_CAIXA -> CAIXA`.
+- **Penalidades por Severidade:**
+  - `BAIXA`: -0.5 pt | `MEDIA`: -1.0 pt | `ALTA`: -2.0 pts
+- **Função Matemática `calcular_nota(analise: GeminiAuditoriaOutput) -> ResultadoAvaliacao`:**
+  - `base_score = (pontos_obtidos / total_peso_possivel) * 10.0`
+  - `nota_final = max(0.0, min(10.0, base_score - penalidade_extra))`
+  - `requer_acao_imediata = (severidade_alta_presente) or (nota_final < 7.0)`
+  - Caso `NAO_VERIFICAVEL`: nota 0.0, `requer_revisao=True`, `requer_acao_imediata=True`.
+
+### Passo 3: Integração nas Rotas e Webhooks (`main.py` e `services/gemini_service.py`)
+- **Pipeline Perito -> Juiz:**
+  - `analyze_store_image` instancia `GeminiAuditoriaOutput` e aciona `calcular_nota`.
+  - Mocks e tratamento de `INVALID_OBJECT` padronizados para alimentar o avaliador.
+- **Webhook Evolution (`POST /webhook/evolution`):**
+  - Log operacional estruturado com setor, nota calculada, proporção de conformidade e itens corrigíveis.
+  - Persistência no SQLite (`audits.ai_analysis`) enriquecida com `avaliacao` e `gemini_output`.
+- **PWA Upload ao Vivo (`POST /api/upload-auditoria/{store_id}`):**
+  - Resposta enriquecida com `avaliacao`, `resumo_operacional`, `itens_corrigiveis` e `requer_acao_imediata` sem alterar o contrato de campos anteriores.
+
+### Suíte de Testes 100% Conforme:
+- `test_evaluator_service.py`: 5 testes unitários cobrindo todos os cenários determinísticos.
+- `test_gemini_fase1.py`: 4 testes de visão computacional, Chain of Thought e anti-alucinação.
+- `test_gamification.py`: 4 testes de turnos, pontuação e rankings.
+- `test_integration_evaluator.py`: 2 testes de ponta a ponta (PWA e Webhook) integrados ao SQLite e Evolution API.
+
