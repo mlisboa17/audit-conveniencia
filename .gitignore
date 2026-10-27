@@ -1,0 +1,31 @@
+# Environment variables (secrets)
+.env
+
+# Database SQLite
+app.db
+app.db-journal
+*.sqlite
+*.sqlite3
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Logs
+*.log
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+scratch/
+.docker/
+
