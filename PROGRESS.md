@@ -185,3 +185,193 @@ Implementação dos **Passos 1, 2 e 3** com arquitetura em duas camadas: o model
 - `test_gamification.py`: 4 testes de turnos, pontuação e rankings.
 - `test_integration_evaluator.py`: 2 testes de ponta a ponta (PWA e Webhook) integrados ao SQLite e Evolution API.
 
+---
+
+## 9. 🔄 Fase P1: Ciclo de Correção Antes/Depois e Tickets de Pendência
+
+Implementação do ciclo de correção ágil e inteligente via WhatsApp e PWA mobile:
+
+### 1. Modelo de Dados e Persistência (`database.py`)
+- **Tabela `audit_tickets`:**
+  - `id`: UUID v4 primário em formato string.
+  - `audit_origem_id`: Chave estrangeira referenciando a auditoria que gerou o apontamento.
+  - `store_id`: Identificador da loja associada.
+  - `operator_id`: Nome ou identificador do operador responsável.
+  - `setor`: Setor da loja (ex: `FREEZER_GELADEIRA`, `GONDOLA_GERAL`, `ESTUFA`).
+  - `criterio`: Critério não conforme (ex: `espaco_vazio`, `organizacao`, `precificacao`, `limpeza`).
+  - `descricao_falha`: Detalhamento específico da inconformidade apontada pelo perito.
+  - `foto_origem_path`: Caminho no disco da foto do momento da auditoria que registrou a falha.
+  - `status`: Enum de estados (`ABERTO`, `CORRIGIDO`, `EXPIRADO`, `JUSTIFICADO`).
+  - `created_at`: Data e hora de abertura do ticket (UTC).
+  - `expires_at`: TTL automático de 20 minutos (`created_at + 20 min`).
+  - `resolved_at`: Momento exato em que a correção foi homologada.
+  - `bonus_creditado`: Pontuação de bônus concedida (padrão: 25 pontos).
+- **Funções Assíncronas de Acesso:**
+  - `criar_tickets_pendencia(audit_id, store_id, operator_id, setor, itens_corrigiveis, foto_path, session=None)`: Cria tickets individuais para cada inconformidade encontrada com expiração em 20 minutos.
+  - `buscar_ticket_aberto(store_id, setor=None, session=None)`: Localiza o ticket aberto mais recente dentro da janela de validade, aplicando expiração preguiçosa (*lazy sweep*) em tickets vencidos (`status = 'EXPIRADO'`).
+  - `fechar_ticket(ticket_id, status='CORRIGIDO', bonus_pontos=0, session=None)`: Fecha o ticket, armazena `resolved_at` e registra o bônus concedido.
+
+### 2. Serviço de Perícia Comparativa Visual (`services/gemini_service.py`)
+- **Schema Pydantic `GeminiCorrecaoOutput`:**
+  - `mesmo_setor`: Validação booleana se a nova imagem retrata o mesmo espaço físico e ângulo da anterior.
+  - `problema_resolvido`: Validação booleana se a inconformidade descrita foi sanada.
+  - `detalhes_observados`: Descrição visual factual das alterações identificadas entre o Antes e o Depois.
+  - `nivel_confianca`: Grau de precisão visual da análise (0.0 a 1.0).
+- **System Prompt Comparativo Rigoroso:**
+  - Recebe ambas as imagens (Antes/Falha e Depois/Correção).
+  - Exige correspondência física de setor/gôndola e proíbe validação de fotos genéricas ou de outro local.
+- **Método `comparar_correcao`:**
+  - Envio multimodal das duas imagens para o Gemini 2.0 Flash (`temperature=0.1`).
+  - Fallback determinístico inteligente para simulação e testes.
+
+### 3. Interceptação e Gamificação no Webhook & PWA (`main.py`)
+- **Interceptação Inteligente:**
+  - Ao receber uma foto (via webhook do WhatsApp ou captura ao vivo do PWA), o sistema verifica se existe ticket `ABERTO` dentro da janela de 20 minutos para a loja.
+  - Em caso positivo, direciona para `gemini_service.comparar_correcao(foto_antes, foto_depois, ...)`.
+  - **Se `mesmo_setor == True` e `problema_resolvido == True`:**
+    - Ticket marcado como `CORRIGIDO`.
+    - Operador recebe **+25 pontos de bônus** imediatos no ranking.
+    - Notificação comemorativa disparada no grupo de WhatsApp:
+      > ✅ *CORREÇÃO VALIDADA COM SUCESSO!*  
+      > 🏪 *Setor:* FREEZER_GELADEIRA  
+      > 🎯 *Problema resolvido:* Puxar latas de refrigerante para frente  
+      > 🏆 *Bônus:* +25 pontos creditados para Carlos Silva!
+  - **Se divergente ou não resolvido:** Segue com o fluxo de auditoria padrão independente.
+  - **Se nova auditoria gerar itens corrigíveis:** Gera tickets de pendência com expiração de 20 min e envia alerta visual no WhatsApp convocando a equipe para a oportunidade de bônus.
+
+### 4. Suíte de Testes Automatizados (`tests/test_correction_cycle.py`)
+- Suíte `pytest` cobrindo 100% dos requisitos da especificação:
+  1. `test_abertura_ticket_expiracao_20_minutos`: Abertura correta de ticket com TTL de 20 min (1200s).
+  2. `test_comparacao_correcao_resolvida_fecha_ticket_e_adiciona_bonus`: Homologação da correção, fechamento do ticket e crédito de +25 pontos no ranking do operador.
+  3. `test_ticket_expirado_nao_credita_bonus_retroativo`: Garantia de que tickets expirados não bonificam nem interceptam novas auditorias.
+  4. `test_foto_setor_divergente_nao_valida_pendencia`: Rejeição de validação para fotos de setores divergentes.
+- **Resultado:** ✅ 4/4 testes aprovados com sucesso (`pytest tests/test_correction_cycle.py`).
+
+---
+
+## 10. 🛡️ Fase P2: Gamificação Auditável, Limites Anti-Exploit e Trilha de Contestação
+
+Implementação de blindagem de pontuação, tetos diários/turno, comandos operacionais e bônus de consistência:
+
+### 1. Regras Anti-Exploit e Tetos de Pontuação (`database.py`)
+- **Teto de Bônus de Correção:**
+  - Máximo de **3 bônus de correção (+25 pts)** por operador por turno (+75 pts max).
+  - A 4ª tentativa de correção no mesmo turno fecha o ticket como `CORRIGIDO`, mas com `bonus_creditado = 0` e aviso explicativo no WhatsApp: *"Limite de bônus de correção atingido para este turno"*.
+  - Implementado via `contar_bonus_correcao_turno` e `aplicar_correcao_ticket`.
+- **Trilha de Contestação e Justificativas:**
+  - Colunas `justificativa_texto` (TEXT) e `justificado_por` (VARCHAR) persistidas no modelo `AuditTicket` com migração automática no `init_db()`.
+  - Função assíncrona `justificar_ticket(ticket_id, motivo, autor) -> bool`:
+    - Altera status de `ABERTO` para `JUSTIFICADO`.
+    - Registra data de resolução e autor.
+    - Exclui o apontamento do cômputo de pendências/falhas operacionais.
+
+### 2. Comandos Operacionais no WhatsApp (`main.py` e `services/evolution_service.py`)
+- **Comando `!justificar <ID_TICKET> <MOTIVO>`:**
+  - Ex: `!justificar a1b2c3 Falta de estoque no CD central`
+  - Valida se o ticket existe na loja e está `ABERTO` (busca por ID completo ou prefixo de 6-8 caracteres).
+  - Registra a justificativa e responde com confirmação estruturada:
+    > 📝 *JUSTIFICATIVA REGISTRADA COM SUCESSO!*  
+    > 🎫 *Ticket:* a1b2c3 | *Setor:* ESTUFA_SALGADOS  
+    > 📌 *Motivo:* Falta de estoque no CD central  
+    > Operação liberada sem penalidade para a loja.
+- **Comando `!pendencias`:**
+  - Lista todos os tickets em aberto da loja no momento com tempo restante de TTL.
+  - Executa *lazy sweep* atualizando tickets vencidos para `EXPIRADO`.
+  - Exibe ID curto, setor, falha e minutos restantes para correção ou contestação.
+- **Ignore Set Aprimorado (`evolution_service.py`):**
+  - Comandos operacionais `!justificar` e `!pendencias` são filtrados para não serem interpretados erroneamente como nomes de colaboradores.
+
+### 3. Bônus de Consistência - Loja Padrão 10 (`services/evaluator_service.py`)
+- **Fechamento e Avaliação de Turno (`avaliar_consistencia_turno`):**
+  - Critérios Rígidos:
+    1. Mínimo de 4 setores distintos auditados no turno.
+    2. Todos os setores auditados devem ter obtido nota calculada >= 9.0.
+    3. Zero tickets pendentes não resolvidos (nenhum ticket em status `ABERTO` ou `EXPIRADO`).
+  - Premiação:
+    - Credita **+50 pontos** de Loja Padrão 10 divididos igualmente entre os operadores ativos do turno.
+    - Estimula a equipe a manter a loja no padrão de excelência desde o início do turno.
+
+### 4. Suíte de Testes Automatizados (`tests/test_gamification_p2.py`)
+- Suíte `pytest` cobrindo 100% dos requisitos da especificação:
+  1. `test_limite_teto_bonus_correcao`: Valida 3 bônus de +25 pts e bloqueio com 0 pts na 4ª correção.
+  2. `test_comando_justificar_ticket`: Valida contestação via WhatsApp, persistência do motivo e transição para `JUSTIFICADO`.
+  3. `test_comando_pendencias_loja`: Valida listagem de pendências ativas com TTL e expiração preguiçosa.
+  4. `test_bonus_consistencia_loja_padrao_10`: Valida concessão de +50 pts com 4 setores >= 9.0 e bloqueio caso haja pendências não resolvidas.
+- **Resultado:** ✅ 4/4 testes aprovados com sucesso (`pytest tests/test_gamification_p2.py`).
+
+---
+
+## 11. 🎯 Fase P3: Pipeline de Visão Blindada em 2 Etapas (Gatekeeper + Perito Especialista do Setor)
+
+Implementação do pipeline de visão computacional em 2 estágios desacoplados para eliminar alucinações de elementos, descarte imediato de ruídos/memes/fotos ilegíveis e foco cirúrgico no setor confirmado:
+
+### 1. Gatekeeper de Sanidade e Triagem Visual (`services/gemini_service.py`)
+- **Schema Pydantic `GatekeeperOutput`:**
+  - `is_conveniencia_valida: bool`: Validação estrita se a imagem pertence ao ecossistema de conveniência/posto de combustível.
+  - `qualidade_imagem_ok: bool`: Checagem rigorosa de foco, iluminação, enquadramento e resolução.
+  - `motivo_rejeicao: Optional[str]`: Motivo claro da recusa (ex: *'Foto muito escura'*, *'Imagem não pertence a uma conveniência'*, *'Foto excessivamente borrada'*).
+  - `setor_detectado: str`: `FREEZER_GELADEIRA`, `ESTUFA`, `BANHEIRO`, `VIDROS`, `CAIXA`, `GONDOLA_GERAL`, `OUTRO`.
+  - `nivel_certeza_setor: float`: Nível de certeza da classificação entre 0.0 e 1.0.
+  - Implementa protocolo `__await__` para interoperabilidade síncrona/assíncrona transparente.
+- **Diretrizes Rígidas de Triagem:**
+  - Descarte imediato de selfies, pessoas em primeiro plano, documentos, comprovantes/notinhas fiscais, prints de celular/conversas, memes, fotos pretas/subexpostas, chão/teto sem contexto e fotos borradas.
+  - Se rejeitado: encerra a auditoria imediatamente na Etapa 1, retornando `StatusAnalise.NAO_VERIFICAVEL`, nota 0.0, `requer_revisao=True` e `evidencias=[]`, sem acionar o perito do setor.
+  - **Regra Inegociável:** Qualquer imagem com geladeiras expositoras verticais, cervejeiras, freezers ou portas de vidro de bebidas é cravada como `FREEZER_GELADEIRA`.
+
+### 2. Prompts de Peritos Especialistas Setoriais (`services/gemini_service.py`)
+- Prompts cirúrgicos isolados por setor no perito visual:
+  - `PROMPT_ESPECIALISTA_FREEZER`: Foco obrigatório em frenteamento (facing), espaços vazios (rupturas visíveis), limpeza de vidros/portas e organização. Proibição expressa de tentar ler marcas ilegíveis ou alucinar fios/bobinas de checkout.
+  - `PROMPT_ESPECIALISTA_ESTUFA`: Foco em transparência do vidro frontal (ausência de gordura/sujeira), organização das bandejas e salgados dourados/apetitosos. Proibição expressa de inferir temperatura ou validade física de alimentos.
+  - `PROMPT_ESPECIALISTA_BANHEIRO`: Foco em lixeira com saco plástico, insumos (papel toalha/papel higiênico/sabonete), higiene de pia/espelho e piso seco. Proibição expressa de pontuar precificação, estoque ou itens de impulso no banheiro.
+  - `PROMPT_ESPECIALISTA_GONDOLA_GERAL`: Foco em alinhamento de embalagens de snacks/mercearia, ausência de pacotes caídos no fundo e frentes com espaços vazios.
+  - `PROMPT_ESPECIALISTA_CAIXA`: Foco no balcão de checkout desobstruído para clientes, ausência de lixo/pertences pessoais e displays de impulso alinhados.
+  - `PROMPT_ESPECIALISTA_VIDROS`: Foco nas vidraças externas da fachada e portas de entrada, sem poeira grossa e conservação de faixas/adesivos.
+
+### 3. Orquestração do Fluxo `analisar_foto` & Integração
+- **Método `analisar_foto(img_bytes, mime_type)`:**
+  - Etapa 1: Executa `validar_foto_conveniencia(img_bytes)`. Em caso de rejeição, retorna imediatamente `GeminiAuditoriaOutput` com `NAO_VERIFICAVEL` e nota 0.0 calculada pelo avaliador determinístico.
+  - Etapa 2: Com sanidade aprovada, injeta exclusivamente o prompt cirúrgico do setor detectado no Gemini 2.0 Flash (`temperature=0.1`).
+  - Encaminha o laudo validado diretamente para `evaluator_service.calcular_nota(...)`.
+- **Compatibilidade:** `analyze_store_image` delega para o pipeline desacoplado e mantém compatibilidade total com webhooks, comandos e PWA.
+
+### 4. Suíte de Testes Automatizados (`tests/test_vision_pipeline.py`)
+- `test_gatekeeper_rejeita_imagem_fora_de_contexto`: Valida descarte de memes/comprovantes gerando `NAO_VERIFICAVEL` sem acionar perito.
+- `test_gatekeeper_rejeita_qualidade_escura_ou_borrada`: Valida descarte de fotos degradadas com `qualidade_imagem_ok = False`.
+- `test_perito_setorial_freezer_aplica_regras_estritas`: Valida que laudo de freezer contém critérios estritos e 0 critérios de banheiro/estufa/caixa.
+- `test_perito_setorial_outros_setores_regras_estritas`: Valida isolamento entre banheiro e estufa.
+- `test_pipeline_integrado_foto_valida`: Valida execução integrada das duas etapas e pontuação matemática consistente pelo avaliador.
+- `test_gatekeeper_prioridade_inegociavel_freezer`: Valida que fotos de geladeiras nunca são desviadas para Caixa.
+- **Resultado:** ✅ 6/6 testes aprovados com sucesso (`pytest tests/test_vision_pipeline.py`).
+
+---
+
+## 12. 📸 Auditoria de Fotos Reais em `dataset/` (`scripts/auditar_fotos_reais.py`)
+
+Criação da infraestrutura para processamento em lote de fotos reais de conveniência consumindo a API real do Gemini (Zero Mocks):
+
+### 1. Diretório Oficial `dataset/`
+- Localização oficial na raiz do projeto: `dataset/`
+- Subdiretório para persistência de laudos JSON: `dataset/resultados/`
+- Formatos de imagem suportados: `.jpg`, `.jpeg`, `.png`.
+
+### 2. Script de Execução Real (`scripts/auditar_fotos_reais.py`)
+- **Carregamento de Ambiente:** Carrega `.env` com `python-dotenv` e valida `GEMINI_API_KEY`.
+- **Política Zero Mocks:**
+  - Bloqueia a execução imediatamente se `GEMINI_API_KEY` for o placeholder ou estiver vazia.
+  - Sobrescreve métodos de fallback para lançar exceção explícita caso a chamada real falhe, garantindo que nenhum laudo sintético seja gerado.
+- **Detecção de Pasta Vazia:**
+  - Exibe aviso explicativo caso `dataset/` não contenha imagens:
+    *"⚠️ Nenhuma foto encontrada na pasta 'dataset/'. Adicione fotos reais da loja para auditar."*
+- **Pipeline de Execução por Foto:**
+  1. Submete bytes a `gemini_service.analisar_foto(img_bytes)`.
+  2. Encaminha laudo a `evaluator_service.calcular_nota(analise)`.
+  3. Exibe relatório visual no terminal com formatação rica:
+     - Foto, Status do Gatekeeper, Setor, Confiança, Evidências com Severidade, Nota / 10.0, Ação Imediata e Itens Corrigíveis.
+  4. Salva o laudo completo estruturado em `dataset/resultados/[nome_do_arquivo].json`.
+- **Mecanismos de Resiliência Implementados:**
+  - *Retomada Inteligente (Skip):* Ignora arquivos já auditados anteriormente com a mensagem `⏭️ [Ignorando] {nome_arquivo}`.
+  - *Pacing e Backoff Exponencial:* Intervalo de 12 segundos e retry automático com chaveamento de modelos caso haja sobrecarga ou esgotamento de cota diária.
+- **Resultado Operacional Real (Zero Mocks):**
+  - **14/14 fotos auditadas com 100% de sucesso** consumindo a API oficial do Google Gemini.
+  - Laudos estruturados e determinísticos salvos em `dataset/resultados/`.
+

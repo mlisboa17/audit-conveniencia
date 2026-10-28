@@ -1,0 +1,69 @@
+{
+  "arquivo": "WhatsApp Image 2026-10-27 at 09.07.34 (1).jpeg",
+  "caminho_origem": "C:\\Projetos\\audit-conveniencia\\dataset\\WhatsApp Image 2026-10-27 at 09.07.34 (1).jpeg",
+  "data_auditoria": "2026-10-27T22:52:37.589216",
+  "modelo_ia": "gemini-3.5-flash",
+  "gatekeeper": {
+    "status": "Aprovado",
+    "aprovado": true,
+    "setor_detectado": "FREEZER_GELADEIRA",
+    "confianca_percentual": 98
+  },
+  "perito_setorial": {
+    "setor": "FREEZER_GELADEIRA",
+    "status_analise": "CONCLUIDA",
+    "nivel_confianca": 0.98,
+    "requer_revisao": false,
+    "elementos_visuais_detectados": [
+      "refrigerador vertical de energéticos",
+      "latas de energético",
+      "etiquetas de preço digitais",
+      "iluminação interna LED",
+      "grade organizadora"
+    ],
+    "evidencias": [
+      {
+        "criterio": "organizacao",
+        "descricao": "Latas perfeitamente alinhadas, em pé e puxadas para a fita frontal, garantindo excelente exposição de frenteamento (facing).",
+        "localizacao": "todas as prateleiras do refrigerador",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "espaco_vazio",
+        "descricao": "Ausência de rupturas ou buracos visíveis na frente das grades, com todas as fileiras frontais totalmente preenchidas.",
+        "localizacao": "frente das prateleiras",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "precificacao",
+        "descricao": "Etiquetas de preço visíveis instaladas nas canaletas frontais das prateleiras.",
+        "localizacao": "canaletas do refrigerador",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "limpeza",
+        "descricao": "Iluminação interna funcionando adequadamente com boa visibilidade dos produtos organizados.",
+        "localizacao": "interior do refrigerador",
+        "conforme": true,
+        "severidade": "BAIXA"
+      }
+    ],
+    "acoes_recomendadas": [
+      "Manter o excelente padrão de alinhamento e frenteamento durante os repasses de estoque."
+    ]
+  },
+  "avaliacao_deterministica": {
+    "setor": "FREEZER_GELADEIRA",
+    "nota_calculada": 10.0,
+    "status_analise": "CONCLUIDA",
+    "total_criterios_avaliados": 4,
+    "criterios_conformes": 4,
+    "requer_revisao": false,
+    "requer_acao_imediata": false,
+    "itens_corrigiveis": [],
+    "resumo_operacional": "Setor FREEZER_GELADEIRA: 4/4 conformes. 0 apontamento(s)."
+  }
+}

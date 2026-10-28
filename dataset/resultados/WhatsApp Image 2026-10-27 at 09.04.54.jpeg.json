@@ -1,0 +1,80 @@
+{
+  "arquivo": "WhatsApp Image 2026-10-27 at 09.04.54.jpeg",
+  "caminho_origem": "C:\\Projetos\\audit-conveniencia\\dataset\\WhatsApp Image 2026-10-27 at 09.04.54.jpeg",
+  "data_auditoria": "2026-10-27T22:49:46.801044",
+  "modelo_ia": "gemini-3.5-flash",
+  "gatekeeper": {
+    "status": "Aprovado",
+    "aprovado": true,
+    "setor_detectado": "FREEZER_GELADEIRA",
+    "confianca_percentual": 95
+  },
+  "perito_setorial": {
+    "setor": "FREEZER_GELADEIRA",
+    "status_analise": "CONCLUIDA",
+    "nivel_confianca": 0.95,
+    "requer_revisao": false,
+    "elementos_visuais_detectados": [
+      "cervejeira vertical vermelha",
+      "cervejeira vertical amarela",
+      "latas de cerveja",
+      "garrafas de vidro",
+      "garrafas PET de refrigerante",
+      "etiquetas de preço e material promocional",
+      "iluminação interna de refrigerador"
+    ],
+    "evidencias": [
+      {
+        "criterio": "organizacao",
+        "descricao": "produtos dispostos em pé e alinhados por categoria nas prateleiras de ambas as cervejeiras",
+        "localizacao": "prateleiras superiores e intermediárias de ambos os refrigeradores",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "espaco_vazio",
+        "descricao": "presença de lacunas e frentes vazias entre as garrafas PET e em algumas fileiras de latas",
+        "localizacao": "prateleira inferior da cervejeira vermelha e prateleiras intermediárias da cervejeira amarela",
+        "conforme": false,
+        "severidade": "MEDIA"
+      },
+      {
+        "criterio": "limpeza",
+        "descricao": "vidros das portas limpos, sem manchas de gordura ou embaçamento excessivo, e iluminação interna funcional",
+        "localizacao": "portas de vidro de ambos os refrigeradores",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "precificacao",
+        "descricao": "presença de sinalização promocional e etiquetas nas canaletas de suporte",
+        "localizacao": "vidro superior e canaletas das prateleiras",
+        "conforme": true,
+        "severidade": "BAIXA"
+      }
+    ],
+    "acoes_recomendadas": [
+      "Realizar o frenteamento (puxar produtos para a borda frontal) das garrafas PET e latas nas prateleiras com espaços vagos",
+      "Efetuar a reposição de estoque nas frentes vazias do setor inferior da cervejeira vermelha"
+    ]
+  },
+  "avaliacao_deterministica": {
+    "setor": "FREEZER_GELADEIRA",
+    "nota_calculada": 6.0,
+    "status_analise": "CONCLUIDA",
+    "total_criterios_avaliados": 4,
+    "criterios_conformes": 3,
+    "requer_revisao": false,
+    "requer_acao_imediata": true,
+    "itens_corrigiveis": [
+      {
+        "criterio": "espaco_vazio",
+        "descricao": "presença de lacunas e frentes vazias entre as garrafas PET e em algumas fileiras de latas",
+        "localizacao": "prateleira inferior da cervejeira vermelha e prateleiras intermediárias da cervejeira amarela",
+        "severidade": "MEDIA",
+        "acao_sugerida": "Realizar o frenteamento (puxar produtos para a borda frontal) das garrafas PET e latas nas prateleiras com espaços vagos"
+      }
+    ],
+    "resumo_operacional": "Setor FREEZER_GELADEIRA: 3/4 conformes. 1 apontamento(s)."
+  }
+}

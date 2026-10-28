@@ -1,0 +1,83 @@
+{
+  "arquivo": "WhatsApp Image 2026-10-27 at 19.11.55 (2).jpeg",
+  "caminho_origem": "C:\\Projetos\\audit-conveniencia\\dataset\\WhatsApp Image 2026-10-27 at 19.11.55 (2).jpeg",
+  "data_auditoria": "2026-10-27T23:16:25.461953",
+  "modelo_ia": "gemini-3.1-flash-lite",
+  "gatekeeper": {
+    "status": "Aprovado",
+    "aprovado": true,
+    "setor_detectado": "FREEZER_GELADEIRA",
+    "confianca_percentual": 98
+  },
+  "perito_setorial": {
+    "setor": "FREEZER_GELADEIRA",
+    "status_analise": "CONCLUIDA",
+    "nivel_confianca": 0.98,
+    "requer_revisao": false,
+    "elementos_visuais_detectados": [
+      "cervejeira vertical",
+      "latas de cerveja",
+      "garrafas de vidro long neck"
+    ],
+    "evidencias": [
+      {
+        "criterio": "organizacao",
+        "descricao": "produtos alinhados e frenteados na borda frontal das grades",
+        "localizacao": "todas as prateleiras",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "espaco_vazio",
+        "descricao": "ausência de rupturas ou buracos nas fileiras frontais",
+        "localizacao": "todas as prateleiras",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "limpeza",
+        "descricao": "vidro da porta apresenta marcas de dedos e manchas superficiais",
+        "localizacao": "porta de vidro",
+        "conforme": false,
+        "severidade": "MEDIA"
+      },
+      {
+        "criterio": "precificacao",
+        "descricao": "ausência de etiquetas de preço nas canaletas das grades",
+        "localizacao": "todas as prateleiras",
+        "conforme": false,
+        "severidade": "ALTA"
+      }
+    ],
+    "acoes_recomendadas": [
+      "Realizar limpeza do vidro da porta para remover marcas de dedos",
+      "Instalar etiquetas de preço nas canaletas correspondentes a cada produto"
+    ]
+  },
+  "avaliacao_deterministica": {
+    "setor": "FREEZER_GELADEIRA",
+    "nota_calculada": 3.0,
+    "status_analise": "CONCLUIDA",
+    "total_criterios_avaliados": 4,
+    "criterios_conformes": 2,
+    "requer_revisao": false,
+    "requer_acao_imediata": true,
+    "itens_corrigiveis": [
+      {
+        "criterio": "limpeza",
+        "descricao": "vidro da porta apresenta marcas de dedos e manchas superficiais",
+        "localizacao": "porta de vidro",
+        "severidade": "MEDIA",
+        "acao_sugerida": "Realizar limpeza do vidro da porta para remover marcas de dedos"
+      },
+      {
+        "criterio": "precificacao",
+        "descricao": "ausência de etiquetas de preço nas canaletas das grades",
+        "localizacao": "todas as prateleiras",
+        "severidade": "ALTA",
+        "acao_sugerida": "Realizar limpeza do vidro da porta para remover marcas de dedos"
+      }
+    ],
+    "resumo_operacional": "Setor FREEZER_GELADEIRA: 2/4 conformes. 2 apontamento(s)."
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "arquivo": "WhatsApp Image 2026-10-27 at 11.23.29.jpeg",
+  "caminho_origem": "C:\\Projetos\\audit-conveniencia\\dataset\\WhatsApp Image 2026-10-27 at 11.23.29.jpeg",
+  "data_auditoria": "2026-10-27T23:15:17.012803",
+  "modelo_ia": "gemini-3.1-flash-lite",
+  "gatekeeper": {
+    "status": "Aprovado",
+    "aprovado": true,
+    "setor_detectado": "FREEZER_GELADEIRA",
+    "confianca_percentual": 98
+  },
+  "perito_setorial": {
+    "setor": "FREEZER_GELADEIRA",
+    "status_analise": "CONCLUIDA",
+    "nivel_confianca": 0.98,
+    "requer_revisao": false,
+    "elementos_visuais_detectados": [
+      "geladeira expositora vertical",
+      "latas de refrigerante",
+      "garrafas pet de água",
+      "garrafas de chá",
+      "bebidas energéticas",
+      "sanduíches embalados"
+    ],
+    "evidencias": [
+      {
+        "criterio": "organizacao",
+        "descricao": "produtos alinhados e frenteados na borda frontal, mantendo boa organização visual",
+        "localizacao": "todas as prateleiras",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "espaco_vazio",
+        "descricao": "ausência de rupturas significativas; prateleiras com ocupação completa",
+        "localizacao": "todas as prateleiras",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "limpeza",
+        "descricao": "vidro frontal apresenta marcas de dedos e leve embaçamento, prejudicando a visibilidade",
+        "localizacao": "porta de vidro",
+        "conforme": false,
+        "severidade": "MEDIA"
+      },
+      {
+        "criterio": "precificacao",
+        "descricao": "etiquetas de preço presentes e legíveis na maioria das canaletas",
+        "localizacao": "canaletas das prateleiras",
+        "conforme": true,
+        "severidade": "BAIXA"
+      }
+    ],
+    "acoes_recomendadas": [
+      "Realizar limpeza externa e interna do vidro da porta para remover marcas de dedos e manchas",
+      "Manter o monitoramento do frenteamento para garantir que os produtos permaneçam na borda frontal"
+    ]
+  },
+  "avaliacao_deterministica": {
+    "setor": "FREEZER_GELADEIRA",
+    "nota_calculada": 7.0,
+    "status_analise": "CONCLUIDA",
+    "total_criterios_avaliados": 4,
+    "criterios_conformes": 3,
+    "requer_revisao": false,
+    "requer_acao_imediata": false,
+    "itens_corrigiveis": [
+      {
+        "criterio": "limpeza",
+        "descricao": "vidro frontal apresenta marcas de dedos e leve embaçamento, prejudicando a visibilidade",
+        "localizacao": "porta de vidro",
+        "severidade": "MEDIA",
+        "acao_sugerida": "Realizar limpeza externa e interna do vidro da porta para remover marcas de dedos e manchas"
+      }
+    ],
+    "resumo_operacional": "Setor FREEZER_GELADEIRA: 3/4 conformes. 1 apontamento(s)."
+  }
+}

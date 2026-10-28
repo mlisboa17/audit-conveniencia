@@ -350,10 +350,13 @@ class EvolutionService:
         # Palavras ignoradas (comandos, saudações e confirmações genéricas)
         ignore_set = {
             "!ranking", "ranking", "ajuda", "!ajuda", "menu", "status",
+            "!pendencias", "!pendências", "pendencias", "pendências",
+            "!justificar", "justificar",
             "ok", "blz", "valeu", "obrigado", "obrigada", "sim", "nao", "não",
             "bom dia", "boa tarde", "boa noite", "ola", "olá", "oi"
         }
-        if cleaned.lower() in ignore_set or len(cleaned) > 50:
+        lower_cleaned = cleaned.lower()
+        if lower_cleaned in ignore_set or lower_cleaned.startswith("!justificar") or lower_cleaned.startswith("justificar ") or len(cleaned) > 50:
             return None
 
         # Remove quebras de linha e símbolos no início

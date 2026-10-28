@@ -28,6 +28,10 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 async def test_pwa_upload_live_integration():
     print("\n--- [Teste Integração 1] PWA Upload ao Vivo com Evaluator Service ---")
     await init_db()
+    async with async_session_factory() as session:
+        from sqlalchemy import text
+        await session.execute(text("DELETE FROM audit_tickets"))
+        await session.commit()
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:

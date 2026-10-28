@@ -1,0 +1,70 @@
+{
+  "arquivo": "WhatsApp Image 2026-10-27 at 09.07.33 (1).jpeg",
+  "caminho_origem": "C:\\Projetos\\audit-conveniencia\\dataset\\WhatsApp Image 2026-10-27 at 09.07.33 (1).jpeg",
+  "data_auditoria": "2026-10-27T22:50:10.574718",
+  "modelo_ia": "gemini-3.5-flash",
+  "gatekeeper": {
+    "status": "Aprovado",
+    "aprovado": true,
+    "setor_detectado": "FREEZER_GELADEIRA",
+    "confianca_percentual": 98
+  },
+  "perito_setorial": {
+    "setor": "FREEZER_GELADEIRA",
+    "status_analise": "CONCLUIDA",
+    "nivel_confianca": 0.98,
+    "requer_revisao": false,
+    "elementos_visuais_detectados": [
+      "refrigerador vertical de bebidas",
+      "latas de refrigerante 350ml",
+      "garrafas PET de refrigerante",
+      "etiquetas de preço nas canaletas",
+      "prateleiras aramadas"
+    ],
+    "evidencias": [
+      {
+        "criterio": "organizacao",
+        "descricao": "Produtos alinhados, em pé e devidamente frenteados na borda frontal de todas as prateleiras, transmitindo sensação de fartura.",
+        "localizacao": "todas as prateleiras",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "espaco_vazio",
+        "descricao": "Ausência de frentes vazias ou rupturas visíveis na primeira linha de produtos da grade frontal.",
+        "localizacao": "frentes das prateleiras 1 a 5",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "precificacao",
+        "descricao": "Etiquetas de preço visíveis e afixadas nas canaletas correspondentes às fileiras de produtos.",
+        "localizacao": "canaletas das prateleiras",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "limpeza",
+        "descricao": "Parte interna do refrigerador e prateleiras limpas, com boa iluminação e sem acúmulo visível de sujeira ou gelo excessivo.",
+        "localizacao": "interior do refrigerador",
+        "conforme": true,
+        "severidade": "BAIXA"
+      }
+    ],
+    "acoes_recomendadas": [
+      "Manter o padrão de frenteamento e abastecimento constante conforme as vendas ocorrem.",
+      "Garantir que os novos produtos inseridos no fundo sigam a regra de giro FIFO (primeiro que entra, primeiro que sai)."
+    ]
+  },
+  "avaliacao_deterministica": {
+    "setor": "FREEZER_GELADEIRA",
+    "nota_calculada": 10.0,
+    "status_analise": "CONCLUIDA",
+    "total_criterios_avaliados": 4,
+    "criterios_conformes": 4,
+    "requer_revisao": false,
+    "requer_acao_imediata": false,
+    "itens_corrigiveis": [],
+    "resumo_operacional": "Setor FREEZER_GELADEIRA: 4/4 conformes. 0 apontamento(s)."
+  }
+}

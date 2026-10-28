@@ -3,10 +3,15 @@ Serviço avaliador determinístico para cálculo matemático de conformidade e n
 por checklist setorial em lojas de conveniência (Desacoplamento: Perito Visual vs Juiz Determinístico).
 """
 
-from typing import Any, Dict, List, Optional
+import json
+from datetime import date
+from typing import Any, Dict, List, Optional, Set
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.gemini_service import GeminiAuditoriaOutput, Severidade, StatusAnalise
+from database import Audit, AuditTicket, add_points_to_operator, async_session_factory
 
 
 class ItemCorrigivel(BaseModel):
@@ -180,4 +185,178 @@ class EvaluatorService:
         return "\n".join(lines)
 
 
+async def avaliar_consistencia_turno(
+    store_id: Any,
+    turno: str,
+    data: date,
+    session: Optional[AsyncSession] = None,
+) -> Dict[str, Any]:
+    """
+    Avalia o fechamento de turno para a concessão do Bônus de Consistência (Loja Padrão 10).
+    Critérios:
+    - Mínimo de 4 setores distintos auditados no turno.
+    - Todos os setores auditados devem ter obtido nota_calculada >= 9.0.
+    - Zero tickets de pendência não resolvidos (sem tickets ABERTO ou EXPIRADO).
+    Premiação:
+    - Credita +50 pontos de Loja Padrão 10 divididos igualmente entre os operadores ativos do turno.
+    """
+    int_store_id = int(store_id)
+    sh_norm = str(turno).strip().upper()
+    if sh_norm in ("MANHA", "T1"):
+        sh_norm = "T1_MANHA"
+    elif sh_norm in ("TARDE", "T2"):
+        sh_norm = "T2_TARDE"
+    elif sh_norm in ("NOITE", "T3"):
+        sh_norm = "T3_NOITE"
+
+    async def _evaluate(s: AsyncSession) -> Dict[str, Any]:
+        # 1. Busca auditorias do turno e data
+        stmt_audits = (
+            select(Audit)
+            .where(
+                Audit.store_id == int_store_id,
+                Audit.date == data,
+                Audit.shift == sh_norm,
+            )
+        )
+        res_audits = await s.execute(stmt_audits)
+        audits = res_audits.scalars().all()
+
+        if not audits:
+            return {
+                "elegivel": False,
+                "loja_padrao_10": False,
+                "motivo": "Nenhuma auditoria registrada neste turno",
+                "total_setores": 0,
+                "setores": [],
+                "tickets_nao_resolvidos": 0,
+                "operadores": [],
+                "pontos_totais": 0.0,
+            }
+
+        # Mapeia notas por setor e operadores ativos
+        setores_scores: Dict[str, List[float]] = {}
+        active_operators: Set[str] = set()
+
+        for a in audits:
+            if a.operator_name:
+                active_operators.add(a.operator_name.strip())
+
+            # Extrai o setor e a nota calculada
+            setor_audit = None
+            nota = a.score if a.score is not None else 0.0
+
+            if a.ai_analysis:
+                try:
+                    js = json.loads(a.ai_analysis) if isinstance(a.ai_analysis, str) else a.ai_analysis
+                    setor_audit = js.get("setor") or (js.get("avaliacao") or {}).get("setor")
+                    if js.get("avaliacao") and "nota_calculada" in js["avaliacao"]:
+                        nota = js["avaliacao"]["nota_calculada"]
+                except Exception:
+                    pass
+
+            if not setor_audit:
+                setor_audit = f"SETOR_AUDIT_{a.id}"
+
+            if setor_audit not in setores_scores:
+                setores_scores[setor_audit] = []
+            setores_scores[setor_audit].append(nota)
+
+        # 2. Verifica se atingiu mínimo de 4 setores
+        total_setores = len(setores_scores)
+        if total_setores < 4:
+            return {
+                "elegivel": False,
+                "loja_padrao_10": False,
+                "motivo": f"Mínimo de 4 setores exigidos, mas apenas {total_setores} foram auditados",
+                "total_setores": total_setores,
+                "setores": list(setores_scores.keys()),
+                "tickets_nao_resolvidos": 0,
+                "operadores": list(active_operators),
+                "pontos_totais": 0.0,
+            }
+
+        # 3. Verifica se todos os setores auditados obtiveram nota >= 9.0
+        setores_reprovados = []
+        for st_name, notas in setores_scores.items():
+            if max(notas) < 9.0:
+                setores_reprovados.append((st_name, max(notas)))
+
+        if setores_reprovados:
+            reprovados_str = ", ".join([f"{st}: {n}" for st, n in setores_reprovados])
+            return {
+                "elegivel": False,
+                "loja_padrao_10": False,
+                "motivo": f"Nem todos os setores obtiveram nota >= 9.0 ({reprovados_str})",
+                "total_setores": total_setores,
+                "setores": list(setores_scores.keys()),
+                "setores_reprovados": setores_reprovados,
+                "tickets_nao_resolvidos": 0,
+                "operadores": list(active_operators),
+                "pontos_totais": 0.0,
+            }
+
+        # 4. Verifica tickets pendentes não resolvidos (ABERTO ou EXPIRADO)
+        audit_ids = [a.id for a in audits]
+        stmt_tickets = (
+            select(AuditTicket)
+            .where(
+                AuditTicket.store_id == int_store_id,
+                AuditTicket.status.in_(["ABERTO", "EXPIRADO"]),
+            )
+        )
+        res_tickets = await s.execute(stmt_tickets)
+        tickets_pendentes = res_tickets.scalars().all()
+        # Filtra tickets que pertencem a este turno/data ou às auditorias do turno
+        tickets_turno = [
+            t for t in tickets_pendentes
+            if t.audit_origem_id in audit_ids
+            or (t.shift and t.shift.upper() == sh_norm and t.created_at.date() == data)
+        ]
+
+        if tickets_turno:
+            return {
+                "elegivel": False,
+                "loja_padrao_10": False,
+                "motivo": f"Existem {len(tickets_turno)} ticket(s) de pendência não resolvidos no turno",
+                "total_setores": total_setores,
+                "setores": list(setores_scores.keys()),
+                "tickets_nao_resolvidos": len(tickets_turno),
+                "operadores": list(active_operators),
+                "pontos_totais": 0.0,
+            }
+
+        # 5. Elegível para o Bônus de Loja Padrão 10 (+50 pts)
+        ops_list = sorted(list(active_operators))
+        pontos_por_op = round(50.0 / len(ops_list), 1) if ops_list else 50.0
+
+        for op_name in ops_list:
+            await add_points_to_operator(s, int_store_id, op_name, pontos_por_op)
+
+        return {
+            "elegivel": True,
+            "loja_padrao_10": True,
+            "store_id": int_store_id,
+            "turno": sh_norm,
+            "data": str(data),
+            "total_setores": total_setores,
+            "setores": list(setores_scores.keys()),
+            "tickets_nao_resolvidos": 0,
+            "pontos_totais": 50.0,
+            "pontos_por_operador": pontos_por_op,
+            "operadores": ops_list,
+            "mensagem": (
+                f"🏆 Bônus de Consistência (Loja Padrão 10) concedido! "
+                f"+50 pontos distribuídos entre: {', '.join(ops_list)}."
+            ),
+        }
+
+    if session:
+        return await _evaluate(session)
+    else:
+        async with async_session_factory() as sess:
+            return await _evaluate(sess)
+
+
+EvaluatorService.avaliar_consistencia_turno = staticmethod(avaliar_consistencia_turno)
 evaluator_service = EvaluatorService()

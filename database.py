@@ -6,6 +6,7 @@ de consulta, migrações de schema, resolução de turno e cálculo de gamifica�
 
 import json
 import logging
+import uuid
 from datetime import date, datetime, timedelta
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -18,6 +19,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    func,
     select,
     text,
 )
@@ -159,6 +161,68 @@ class Alert(Base):
         return f"<Alert id={self.id} store_id={self.store_id} sent_to_director={self.sent_to_director}>"
 
 
+class AuditTicket(Base):
+    """
+    Modelo de Ticket de Inconformidade / Pendência (Ciclo de Correção Antes/Depois).
+    Criado quando uma auditoria identifica itens corrigíveis, com TTL de 20 minutos.
+    """
+
+    __tablename__ = "audit_tickets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    audit_origem_id: Mapped[int] = mapped_column(Integer, ForeignKey("audits.id"), nullable=False, index=True)
+    store_id: Mapped[int] = mapped_column(Integer, ForeignKey("stores.id"), nullable=False, index=True)
+    operator_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)  # Nome ou identificador do operador
+    setor: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    criterio: Mapped[str] = mapped_column(String(80), nullable=False)
+    descricao_falha: Mapped[str] = mapped_column(Text, nullable=False)
+    foto_origem_path: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ABERTO", nullable=False, index=True)  # ABERTO, CORRIGIDO, EXPIRADO, JUSTIFICADO
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    bonus_creditado: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    shift: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    justificativa_texto: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    justificado_por: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+
+    # Relacionamentos
+    audit: Mapped["Audit"] = relationship("Audit", foreign_keys=[audit_origem_id])
+    store: Mapped["Store"] = relationship("Store", foreign_keys=[store_id])
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "audit_origem_id": self.audit_origem_id,
+            "store_id": self.store_id,
+            "operator_id": self.operator_id,
+            "shift": self.shift,
+            "setor": self.setor,
+            "criterio": self.criterio,
+            "descricao_falha": self.descricao_falha,
+            "foto_origem_path": self.foto_origem_path,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,
+            "bonus_creditado": self.bonus_creditado,
+            "justificativa_texto": self.justificativa_texto,
+            "justificado_por": self.justificado_por,
+        }
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+    def get(self, item: str, default: Any = None) -> Any:
+        return getattr(self, item, default)
+
+    def __repr__(self) -> str:
+        return (
+            f"<AuditTicket id='{self.id}' store_id={self.store_id} setor='{self.setor}' "
+            f"criterio='{self.criterio}' status='{self.status}' expires_at={self.expires_at}>"
+        )
+
+
 def resolve_shift(dt: Optional[datetime] = None) -> str:
     """
     Resolve o turno operacional com base no horário:
@@ -260,6 +324,22 @@ async def init_db() -> None:
                 )
         except Exception as e:
             logger.warning(f"Aviso na verificação de migração de audits: {e}")
+
+        # Migração audit_tickets: colunas 'shift', 'justificativa_texto' e 'justificado_por'
+        try:
+            res_tickets = await conn.execute(text("PRAGMA table_info(audit_tickets)"))
+            columns_tickets = [row[1] for row in res_tickets.fetchall()]
+            if "shift" not in columns_tickets:
+                logger.info("Migrando schema: adicionando coluna 'shift' à tabela 'audit_tickets'...")
+                await conn.execute(text("ALTER TABLE audit_tickets ADD COLUMN shift VARCHAR(20)"))
+            if "justificativa_texto" not in columns_tickets:
+                logger.info("Migrando schema: adicionando coluna 'justificativa_texto' à tabela 'audit_tickets'...")
+                await conn.execute(text("ALTER TABLE audit_tickets ADD COLUMN justificativa_texto TEXT"))
+            if "justificado_por" not in columns_tickets:
+                logger.info("Migrando schema: adicionando coluna 'justificado_por' à tabela 'audit_tickets'...")
+                await conn.execute(text("ALTER TABLE audit_tickets ADD COLUMN justificado_por VARCHAR(120)"))
+        except Exception as e:
+            logger.warning(f"Aviso na verificação de migração de audit_tickets: {e}")
 
     # Verifica e sincroniza lojas com seus grupos de WhatsApp
     async with async_session_factory() as session:
@@ -424,6 +504,370 @@ async def save_alert(
     await session.commit()
     await session.refresh(alert)
     return alert
+
+
+# ==========================================================
+# UTILITÁRIOS DE TICKETS DE INCONFORMIDADE (CICLO DE CORREÇÃO)
+# ==========================================================
+
+async def criar_tickets_pendencia(
+    audit_id: Any,
+    store_id: Any,
+    operator_id: Optional[Any],
+    setor: str,
+    itens_corrigiveis: List[Any],
+    foto_path: str,
+    shift: Optional[str] = None,
+    session: Optional[AsyncSession] = None,
+) -> List[AuditTicket]:
+    """
+    Cria tickets de inconformidade para os itens corrigíveis identificados na auditoria.
+    Cada ticket recebe status 'ABERTO' com TTL de 20 minutos (expires_at = created_at + 20 min).
+    """
+    now = datetime.utcnow()
+    expires_at = now + timedelta(minutes=20)
+    int_audit_id = int(audit_id)
+    int_store_id = int(store_id)
+    op_str = str(operator_id).strip() if operator_id else None
+    resolved_shift = (shift or resolve_shift(now)).upper()
+
+    tickets_to_add: List[AuditTicket] = []
+    for it in itens_corrigiveis:
+        if isinstance(it, dict):
+            criterio = it.get("criterio", "geral")
+            descricao = it.get("descricao") or it.get("acao_sugerida") or "Inconformidade observada"
+        else:
+            criterio = getattr(it, "criterio", "geral")
+            descricao = getattr(it, "descricao", None) or getattr(it, "acao_sugerida", None) or "Inconformidade observada"
+
+        t = AuditTicket(
+            id=str(uuid.uuid4()),
+            audit_origem_id=int_audit_id,
+            store_id=int_store_id,
+            operator_id=op_str,
+            setor=setor,
+            criterio=criterio,
+            descricao_falha=descricao,
+            foto_origem_path=foto_path,
+            status="ABERTO",
+            created_at=now,
+            expires_at=expires_at,
+            bonus_creditado=0,
+            shift=resolved_shift,
+        )
+        tickets_to_add.append(t)
+
+    if not tickets_to_add:
+        return []
+
+    if session:
+        session.add_all(tickets_to_add)
+        await session.commit()
+        for t in tickets_to_add:
+            await session.refresh(t)
+        return tickets_to_add
+    else:
+        async with async_session_factory() as sess:
+            sess.add_all(tickets_to_add)
+            await sess.commit()
+            for t in tickets_to_add:
+                await sess.refresh(t)
+            return tickets_to_add
+
+
+async def buscar_ticket_aberto(
+    store_id: Any,
+    setor: Optional[str] = None,
+    session: Optional[AsyncSession] = None,
+) -> Optional[AuditTicket]:
+    """
+    Busca o ticket ABERTO mais recente dentro da janela de validade (expires_at > now) para a loja e setor opcional.
+    Tickets cujo expires_at já passou são automaticamente marcados como 'EXPIRADO'.
+    """
+    int_store_id = int(store_id)
+    now = datetime.utcnow()
+
+    async def _query(s: AsyncSession) -> Optional[AuditTicket]:
+        # 1. Atualiza tickets vencidos para EXPIRADO
+        stmt_expire = (
+            select(AuditTicket)
+            .where(
+                AuditTicket.store_id == int_store_id,
+                AuditTicket.status == "ABERTO",
+                AuditTicket.expires_at <= now,
+            )
+        )
+        res_exp = await s.execute(stmt_expire)
+        expired_tickets = res_exp.scalars().all()
+        for exp_t in expired_tickets:
+            exp_t.status = "EXPIRADO"
+        if expired_tickets:
+            await s.commit()
+
+        # 2. Busca o ticket aberto dentro da validade
+        stmt = (
+            select(AuditTicket)
+            .where(
+                AuditTicket.store_id == int_store_id,
+                AuditTicket.status == "ABERTO",
+                AuditTicket.expires_at > now,
+            )
+        )
+        if setor:
+            stmt = stmt.where(AuditTicket.setor == setor)
+
+        stmt = stmt.order_by(AuditTicket.created_at.desc())
+        res = await s.execute(stmt)
+        return res.scalars().first()
+
+    if session:
+        return await _query(session)
+    else:
+        async with async_session_factory() as sess:
+            return await _query(sess)
+
+
+async def buscar_ticket_por_id_ou_prefixo(
+    ticket_id_ou_prefixo: str,
+    store_id: Optional[Any] = None,
+    session: Optional[AsyncSession] = None,
+) -> Optional[AuditTicket]:
+    """
+    Busca um ticket por ID exato ou por prefixo do ID (ex: primeiros 6-8 dígitos).
+    Opcionalmente restringe à loja informada.
+    """
+    clean_id = ticket_id_ou_prefixo.strip()
+    int_store_id = int(store_id) if store_id is not None else None
+
+    async def _query(s: AsyncSession) -> Optional[AuditTicket]:
+        # 1. Tenta match exato
+        stmt = select(AuditTicket).where(AuditTicket.id == clean_id)
+        if int_store_id is not None:
+            stmt = stmt.where(AuditTicket.store_id == int_store_id)
+        res = await s.execute(stmt)
+        ticket = res.scalars().first()
+        if ticket:
+            return ticket
+
+        # 2. Tenta match por prefixo
+        stmt_prefix = select(AuditTicket).where(AuditTicket.id.ilike(f"{clean_id}%"))
+        if int_store_id is not None:
+            stmt_prefix = stmt_prefix.where(AuditTicket.store_id == int_store_id)
+        stmt_prefix = stmt_prefix.order_by(AuditTicket.created_at.desc())
+        res_prefix = await s.execute(stmt_prefix)
+        return res_prefix.scalars().first()
+
+    if session:
+        return await _query(session)
+    else:
+        async with async_session_factory() as sess:
+            return await _query(sess)
+
+
+async def buscar_tickets_abertos_loja(
+    store_id: Any,
+    session: Optional[AsyncSession] = None,
+) -> List[AuditTicket]:
+    """
+    Busca todos os tickets com status 'ABERTO' e expires_at > now para a loja.
+    Realiza lazy sweep marcando tickets vencidos como 'EXPIRADO'.
+    """
+    int_store_id = int(store_id)
+    now = datetime.utcnow()
+
+    async def _query(s: AsyncSession) -> List[AuditTicket]:
+        # 1. Lazy sweep de tickets vencidos
+        stmt_exp = (
+            select(AuditTicket)
+            .where(
+                AuditTicket.store_id == int_store_id,
+                AuditTicket.status == "ABERTO",
+                AuditTicket.expires_at <= now,
+            )
+        )
+        res_exp = await s.execute(stmt_exp)
+        expired_list = res_exp.scalars().all()
+        for t in expired_list:
+            t.status = "EXPIRADO"
+        if expired_list:
+            await s.commit()
+
+        # 2. Retorna pendências ativas
+        stmt = (
+            select(AuditTicket)
+            .where(
+                AuditTicket.store_id == int_store_id,
+                AuditTicket.status == "ABERTO",
+                AuditTicket.expires_at > now,
+            )
+            .order_by(AuditTicket.expires_at.asc())
+        )
+        res = await s.execute(stmt)
+        return list(res.scalars().all())
+
+    if session:
+        return await _query(session)
+    else:
+        async with async_session_factory() as sess:
+            return await _query(sess)
+
+
+async def justificar_ticket(
+    ticket_id: str,
+    motivo: str,
+    autor: str,
+    session: Optional[AsyncSession] = None,
+) -> bool:
+    """
+    Justifica um ticket de pendência em aberto (ex: falta de estoque do fornecedor).
+    Altera o status de 'ABERTO' para 'JUSTIFICADO', salva motivo/autor e remove
+    o ticket do cômputo de penalidades operacionais da loja.
+    Retorna True se o ticket foi justificado com sucesso, ou False caso contrário.
+    """
+    async def _update(s: AsyncSession) -> bool:
+        ticket = await buscar_ticket_por_id_ou_prefixo(ticket_id, session=s)
+        if not ticket or ticket.status != "ABERTO":
+            return False
+
+        ticket.status = "JUSTIFICADO"
+        ticket.justificativa_texto = motivo.strip()
+        ticket.justificado_por = autor.strip()
+        ticket.resolved_at = datetime.utcnow()
+        await s.commit()
+        await s.refresh(ticket)
+        logger.info(
+            f"[Audit Tickets] Ticket #{ticket.id} ({ticket.setor}) JUSTIFICADO por {autor}: "
+            f"'{motivo}' (loja #{ticket.store_id})."
+        )
+        return True
+
+    if session:
+        return await _update(session)
+    else:
+        async with async_session_factory() as sess:
+            return await _update(sess)
+
+
+async def contar_bonus_correcao_turno(
+    session: AsyncSession,
+    store_id: int,
+    operator_name: str,
+    shift: str,
+    data_ref: Optional[date] = None,
+) -> int:
+    """
+    Conta quantos bônus de correção (> 0 pontos) o operador já recebeu neste turno e data na loja.
+    Utilizado para impor o teto anti-exploit de 3 bônus por operador por turno (+75 pts max).
+    """
+    if not operator_name:
+        return 0
+
+    if data_ref is None:
+        data_ref = date.today()
+
+    start_dt = datetime.combine(data_ref, datetime.min.time())
+    end_dt = datetime.combine(data_ref, datetime.max.time())
+    norm_shift = shift.upper()
+
+    stmt = (
+        select(func.count(AuditTicket.id))
+        .where(
+            AuditTicket.store_id == int(store_id),
+            AuditTicket.operator_id.ilike(operator_name.strip()),
+            AuditTicket.status == "CORRIGIDO",
+            AuditTicket.bonus_creditado > 0,
+            AuditTicket.shift == norm_shift,
+            AuditTicket.resolved_at >= start_dt,
+            AuditTicket.resolved_at <= end_dt,
+        )
+    )
+    res = await session.execute(stmt)
+    return res.scalar_one() or 0
+
+
+async def aplicar_correcao_ticket(
+    session: AsyncSession,
+    ticket_id: str,
+    store_id: int,
+    operator_name: Optional[str],
+    shift: str,
+    data_ref: Optional[date] = None,
+) -> Tuple[AuditTicket, int, Optional[str]]:
+    """
+    Aplica a resolução de um ticket com verificação de teto anti-exploit:
+    - Máximo de 3 bônus de correção (+25 pts) por operador por turno (+75 pts max).
+    - Se atingir o teto, o ticket fecha como 'CORRIGIDO', mas com bonus_creditado = 0
+      e aviso de teto atingido.
+    Retorna: (ticket, bonus_creditado, aviso_limite)
+    """
+    ticket = await buscar_ticket_por_id_ou_prefixo(ticket_id, store_id=store_id, session=session)
+    if not ticket:
+        raise ValueError(f"Ticket {ticket_id} não encontrado na loja {store_id}.")
+
+    norm_shift = shift.upper()
+    op_name = operator_name or ticket.operator_id or "Equipe"
+
+    # Verifica limite de 3 bônus no turno
+    bonus_recebidos = await contar_bonus_correcao_turno(
+        session=session,
+        store_id=store_id,
+        operator_name=op_name,
+        shift=norm_shift,
+        data_ref=data_ref,
+    )
+
+    if bonus_recebidos < 3:
+        bonus_a_creditar = 25
+        aviso = None
+        await add_points_to_operator(session, int(store_id), op_name, 25.0)
+    else:
+        bonus_a_creditar = 0
+        aviso = "Limite de bônus de correção atingido para este turno"
+
+    ticket.status = "CORRIGIDO"
+    ticket.bonus_creditado = bonus_a_creditar
+    ticket.operator_id = op_name
+    ticket.shift = norm_shift
+    ticket.resolved_at = datetime.utcnow()
+    await session.commit()
+    await session.refresh(ticket)
+
+    return ticket, bonus_a_creditar, aviso
+
+
+async def fechar_ticket(
+    ticket_id: str,
+    status: str = "CORRIGIDO",
+    bonus_pontos: int = 0,
+    shift: Optional[str] = None,
+    operator_id: Optional[str] = None,
+    session: Optional[AsyncSession] = None,
+) -> Optional[AuditTicket]:
+    """
+    Atualiza o status de um ticket (ex: CORRIGIDO, JUSTIFICADO, EXPIRADO),
+    registra a data de resolução e os pontos de bônus creditados.
+    """
+    async def _update(s: AsyncSession) -> Optional[AuditTicket]:
+        stmt = select(AuditTicket).where(AuditTicket.id == ticket_id)
+        res = await s.execute(stmt)
+        ticket = res.scalars().first()
+        if ticket:
+            ticket.status = status
+            ticket.bonus_creditado = bonus_pontos
+            if shift:
+                ticket.shift = shift.upper()
+            if operator_id:
+                ticket.operator_id = operator_id
+            ticket.resolved_at = datetime.utcnow()
+            await s.commit()
+            await s.refresh(ticket)
+        return ticket
+
+    if session:
+        return await _update(session)
+    else:
+        async with async_session_factory() as sess:
+            return await _update(sess)
 
 
 # ==========================================================

@@ -1,0 +1,78 @@
+{
+  "arquivo": "WhatsApp Image 2026-10-27 at 09.07.35.jpeg",
+  "caminho_origem": "C:\\Projetos\\audit-conveniencia\\dataset\\WhatsApp Image 2026-10-27 at 09.07.35.jpeg",
+  "data_auditoria": "2026-10-27T23:14:08.382743",
+  "modelo_ia": "gemini-3.1-flash-lite",
+  "gatekeeper": {
+    "status": "Aprovado",
+    "aprovado": true,
+    "setor_detectado": "CAIXA",
+    "confianca_percentual": 98
+  },
+  "perito_setorial": {
+    "setor": "CAIXA",
+    "status_analise": "CONCLUIDA",
+    "nivel_confianca": 0.98,
+    "requer_revisao": false,
+    "elementos_visuais_detectados": [
+      "balcão de checkout",
+      "maquininha de cartão",
+      "display de doces",
+      "produtos de impulso"
+    ],
+    "evidencias": [
+      {
+        "criterio": "organizacao",
+        "descricao": "área de atendimento com presença de embalagens vazias e lixo sobre a bancada",
+        "localizacao": "topo do balcão",
+        "conforme": false,
+        "severidade": "MEDIA"
+      },
+      {
+        "criterio": "limpeza",
+        "descricao": "presença de resíduos e embalagens descartadas na superfície do balcão",
+        "localizacao": "topo do balcão",
+        "conforme": false,
+        "severidade": "MEDIA"
+      },
+      {
+        "criterio": "impulso_visivel",
+        "descricao": "produtos de bomboniere organizados e alinhados nos displays",
+        "localizacao": "prateleiras do balcão",
+        "conforme": true,
+        "severidade": "BAIXA"
+      }
+    ],
+    "acoes_recomendadas": [
+      "Remover embalagens vazias e lixo da superfície do balcão",
+      "Higienizar a bancada de atendimento para garantir área livre para o cliente",
+      "Manter a organização dos displays de impulso conforme observado"
+    ]
+  },
+  "avaliacao_deterministica": {
+    "setor": "CAIXA",
+    "nota_calculada": 1.0,
+    "status_analise": "CONCLUIDA",
+    "total_criterios_avaliados": 3,
+    "criterios_conformes": 1,
+    "requer_revisao": false,
+    "requer_acao_imediata": true,
+    "itens_corrigiveis": [
+      {
+        "criterio": "organizacao",
+        "descricao": "área de atendimento com presença de embalagens vazias e lixo sobre a bancada",
+        "localizacao": "topo do balcão",
+        "severidade": "MEDIA",
+        "acao_sugerida": "Remover embalagens vazias e lixo da superfície do balcão"
+      },
+      {
+        "criterio": "limpeza",
+        "descricao": "presença de resíduos e embalagens descartadas na superfície do balcão",
+        "localizacao": "topo do balcão",
+        "severidade": "MEDIA",
+        "acao_sugerida": "Remover embalagens vazias e lixo da superfície do balcão"
+      }
+    ],
+    "resumo_operacional": "Setor CAIXA: 1/3 conformes. 2 apontamento(s)."
+  }
+}

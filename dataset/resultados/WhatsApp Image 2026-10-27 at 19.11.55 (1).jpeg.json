@@ -1,0 +1,79 @@
+{
+  "arquivo": "WhatsApp Image 2026-10-27 at 19.11.55 (1).jpeg",
+  "caminho_origem": "C:\\Projetos\\audit-conveniencia\\dataset\\WhatsApp Image 2026-10-27 at 19.11.55 (1).jpeg",
+  "data_auditoria": "2026-10-27T23:04:16.004541",
+  "modelo_ia": "gemini-3.5-flash",
+  "gatekeeper": {
+    "status": "Aprovado",
+    "aprovado": true,
+    "setor_detectado": "FREEZER_GELADEIRA",
+    "confianca_percentual": 95
+  },
+  "perito_setorial": {
+    "setor": "FREEZER_GELADEIRA",
+    "status_analise": "CONCLUIDA",
+    "nivel_confianca": 0.95,
+    "requer_revisao": false,
+    "elementos_visuais_detectados": [
+      "refrigerador vertical expositor",
+      "latas de bebidas mistas e aromatizadas",
+      "garrafas de vidro mista/ice",
+      "garrafas long neck de cerveja",
+      "garrafas de vinho",
+      "iluminação interna led"
+    ],
+    "evidencias": [
+      {
+        "criterio": "organizacao",
+        "descricao": "Produtos alinhados, em pé e puxados para a borda frontal das grades, garantindo um excelente visual e sensação de fartura.",
+        "localizacao": "todas as prateleiras",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "espaco_vazio",
+        "descricao": "Nenhum espaço vazio ou ruptura frontal detectada ao longo das frentes das prateleiras.",
+        "localizacao": "frente das prateleiras",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "precificacao",
+        "descricao": "Ausência de etiquetas de preços nas canaletas/réguas das prateleiras.",
+        "localizacao": "canaletas das prateleiras",
+        "conforme": false,
+        "severidade": "MEDIA"
+      },
+      {
+        "criterio": "limpeza",
+        "descricao": "Interior do expositor limpo, com iluminação em pleno funcionamento e visão clara dos produtos.",
+        "localizacao": "interior do refrigerador",
+        "conforme": true,
+        "severidade": "BAIXA"
+      }
+    ],
+    "acoes_recomendadas": [
+      "Instalar etiquetas de precificação visíveis nas canaletas de cada prateleira.",
+      "Manter o bom padrão de frenteamento e alinhamento durante as reposições do turno."
+    ]
+  },
+  "avaliacao_deterministica": {
+    "setor": "FREEZER_GELADEIRA",
+    "nota_calculada": 7.0,
+    "status_analise": "CONCLUIDA",
+    "total_criterios_avaliados": 4,
+    "criterios_conformes": 3,
+    "requer_revisao": false,
+    "requer_acao_imediata": false,
+    "itens_corrigiveis": [
+      {
+        "criterio": "precificacao",
+        "descricao": "Ausência de etiquetas de preços nas canaletas/réguas das prateleiras.",
+        "localizacao": "canaletas das prateleiras",
+        "severidade": "MEDIA",
+        "acao_sugerida": "Instalar etiquetas de precificação visíveis nas canaletas de cada prateleira."
+      }
+    ],
+    "resumo_operacional": "Setor FREEZER_GELADEIRA: 3/4 conformes. 1 apontamento(s)."
+  }
+}

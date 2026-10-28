@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Any, Dict, Optional
 
+import os
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -22,11 +23,19 @@ from config import settings
 from database import (
     Alert,
     Audit,
+    AuditTicket,
     Operator,
     Store,
     add_points_to_operator,
+    aplicar_correcao_ticket,
     assign_operator_to_audit,
+    buscar_ticket_aberto,
+    buscar_ticket_por_id_ou_prefixo,
+    buscar_tickets_abertos_loja,
     calculate_audit_points,
+    contar_bonus_correcao_turno,
+    criar_tickets_pendencia,
+    fechar_ticket,
     find_store_by_group_jid,
     get_all_stores,
     get_db_session,
@@ -36,6 +45,7 @@ from database import (
     get_store_by_id,
     has_valid_daily_audit,
     init_db,
+    justificar_ticket,
     resolve_shift,
     save_alert,
     save_audit,
@@ -300,7 +310,82 @@ async def evolution_webhook(
                     content={"status": "ranking_sent", "store": store.name},
                 )
 
-            # Caso B: Resposta rápida informando o nome do operador para a última auditoria da loja (últimos 15 min)
+            # Caso B: Comando de Justificativa de Ticket (!justificar <ID> <MOTIVO>)
+            if clean_cmd.startswith("!justificar") or clean_cmd.startswith("justificar "):
+                parts = text_content.strip().split(maxsplit=2)
+                if len(parts) >= 2:
+                    ticket_id_target = parts[1]
+                    motivo = parts[2] if len(parts) > 2 else "Falta de estoque / Operacional"
+                    ticket = await buscar_ticket_por_id_ou_prefixo(ticket_id_target, store_id=store.id, session=session)
+                    if ticket and ticket.status == "ABERTO":
+                        autor_name = participant or "Operador da Loja"
+                        await justificar_ticket(ticket.id, motivo=motivo, autor=autor_name, session=session)
+                        short_id = ticket.id[:8] if len(ticket.id) >= 8 else ticket.id
+                        msg_just = (
+                            "📝 *JUSTIFICATIVA REGISTRADA COM SUCESSO!*\n"
+                            f"🎫 *Ticket:* {short_id} | *Setor:* {ticket.setor}\n"
+                            f"📌 *Motivo:* {motivo}\n"
+                            "Operação liberada sem penalidade para a loja."
+                        )
+                        await evolution_service.send_text_message(store.whatsapp_group_jid, msg_just)
+                        return JSONResponse(
+                            status_code=status.HTTP_200_OK,
+                            content={
+                                "status": "ticket_justified",
+                                "ticket_id": ticket.id,
+                                "setor": ticket.setor,
+                                "motivo": motivo,
+                                "store": store.name,
+                            },
+                        )
+                    else:
+                        msg_not = (
+                            "⚠️ *Ticket não encontrado ou já finalizado:*\n"
+                            f"Não encontramos pendência aberta com ID '{ticket_id_target}'. "
+                            "Envie *!pendencias* para consultar os tickets ativos da sua loja."
+                        )
+                        await evolution_service.send_text_message(store.whatsapp_group_jid, msg_not)
+                        return JSONResponse(
+                            status_code=status.HTTP_200_OK,
+                            content={"status": "ticket_not_found", "ticket_id": ticket_id_target, "store": store.name},
+                        )
+                else:
+                    msg_help = (
+                        "ℹ️ *Formato do comando:* `!justificar [ID] [Motivo]`\n"
+                        "Exemplo: `!justificar a1b2c3 Falta de estoque no CD central`"
+                    )
+                    await evolution_service.send_text_message(store.whatsapp_group_jid, msg_help)
+                    return JSONResponse(
+                        status_code=status.HTTP_200_OK,
+                        content={"status": "invalid_command_format"},
+                    )
+
+            # Caso C: Consulta de Pendências em Aberto (!pendencias)
+            if clean_cmd in ("!pendencias", "!pendências", "pendencias", "pendências"):
+                tickets_abertos = await buscar_tickets_abertos_loja(store.id, session=session)
+                if not tickets_abertos:
+                    msg_p = "✅ *Nenhuma pendência em aberto para esta loja no momento! Parabéns pela conformidade.*"
+                else:
+                    now_pend = datetime.utcnow()
+                    lines = ["⏳ *PENDÊNCIAS EM ABERTO:*"]
+                    for idx, t in enumerate(tickets_abertos, 1):
+                        short_id = t.id[:8] if len(t.id) >= 8 else t.id
+                        minutos_restantes = max(0, int((t.expires_at - now_pend).total_seconds() // 60))
+                        lines.append(f"{idx}. [{short_id}] {t.setor}: {t.descricao_falha} (Expira em {minutos_restantes} min)")
+                    lines.append("\nEnvie a foto corrigida ou use `!justificar [ID] [motivo]`.")
+                    msg_p = "\n".join(lines)
+                await evolution_service.send_text_message(store.whatsapp_group_jid, msg_p)
+                return JSONResponse(
+                    status_code=status.HTTP_200_OK,
+                    content={
+                        "status": "pendencias_listed",
+                        "store": store.name,
+                        "total": len(tickets_abertos),
+                        "tickets": [t.to_dict() for t in tickets_abertos],
+                    },
+                )
+
+            # Caso D: Resposta rápida informando o nome do operador para a última auditoria da loja (últimos 15 min)
             operator_candidate = evolution_service.extract_operator_name_from_text(text_content)
             if operator_candidate:
                 recent_audit = await get_recent_unassigned_audit(session, store.id, max_minutes=15)
@@ -342,6 +427,83 @@ async def evolution_webhook(
     now = datetime.now()
     shift = resolve_shift(now)
     today = date.today()
+
+    # 6.5. Ciclo de Correção Antes/Depois: Interceptação de Tickets de Pendência Abertos
+    ticket_aberto = await buscar_ticket_aberto(store_id=store.id, session=session)
+    if ticket_aberto:
+        logger.info(
+            f"[Webhook Ticket] Encontrado ticket de pendência #{ticket_aberto.id} aberto para {store.name} "
+            f"(Setor: {ticket_aberto.setor} | Falha: '{ticket_aberto.descricao_falha}'). "
+            "Iniciando comparação visual Antes vs Depois..."
+        )
+
+        foto_antes_bytes = None
+        if ticket_aberto.foto_origem_path and os.path.exists(ticket_aberto.foto_origem_path):
+            try:
+                with open(ticket_aberto.foto_origem_path, "rb") as f:
+                    foto_antes_bytes = f.read()
+            except Exception as e:
+                logger.warning(f"[Webhook Ticket] Não foi possível ler foto anterior em {ticket_aberto.foto_origem_path}: {e}")
+
+        if not foto_antes_bytes:
+            foto_antes_bytes = b"foto_origem_antes_bytes"
+
+        comparacao = await gemini_service.comparar_correcao(
+            img_antes_bytes=foto_antes_bytes,
+            img_depois_bytes=image_bytes,
+            criterio_pendente=ticket_aberto.criterio,
+            descricao_falha=ticket_aberto.descricao_falha,
+        )
+
+        if comparacao.mesmo_setor and comparacao.problema_resolvido:
+            op_bonus = operator_name or ticket_aberto.operator_id or "Equipe"
+            ticket_db, bonus_pts, aviso_teto = await aplicar_correcao_ticket(
+                session=session,
+                ticket_id=ticket_aberto.id,
+                store_id=store.id,
+                operator_name=op_bonus,
+                shift=shift,
+            )
+
+            logger.info(
+                f"[Webhook Ticket] Correção VALIDADA para o ticket #{ticket_aberto.id}! "
+                f"Bônus: +{bonus_pts} pts para {op_bonus} (Aviso: {aviso_teto or 'Nenhum'})."
+            )
+
+            if bonus_pts > 0:
+                msg_correcao = (
+                    "✅ *CORREÇÃO VALIDADA COM SUCESSO!*\n"
+                    f"🏪 *Setor:* {ticket_aberto.setor}\n"
+                    f"🎯 *Problema resolvido:* {ticket_aberto.descricao_falha}\n"
+                    f"🏆 *Bônus:* +{bonus_pts} pontos creditados para *{op_bonus}*!"
+                )
+            else:
+                msg_correcao = (
+                    "✅ *CORREÇÃO VALIDADA COM SUCESSO!*\n"
+                    f"🏪 *Setor:* {ticket_aberto.setor}\n"
+                    f"🎯 *Problema resolvido:* {ticket_aberto.descricao_falha}\n"
+                    f"⚠️ *Aviso:* {aviso_teto or 'Limite de bônus de correção atingido para este turno'}."
+                )
+            await evolution_service.send_text_message(store.whatsapp_group_jid, msg_correcao)
+
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content={
+                    "status": "ticket_corrected",
+                    "store": store.name,
+                    "ticket_id": ticket_aberto.id,
+                    "bonus": bonus_pts,
+                    "operator": op_bonus,
+                    "aviso": aviso_teto,
+                    "detalhes": comparacao.detalhes_observados,
+                },
+            )
+        else:
+            logger.info(
+                f"[Webhook Ticket] Foto não validou o ticket #{ticket_aberto.id} "
+                f"(mesmo_setor={comparacao.mesmo_setor}, resolvido={comparacao.problema_resolvido}). "
+                "Seguindo com o fluxo padrão de auditoria independente."
+            )
 
     logger.info(
         f"[Webhook] Foto recebida do grupo de {store.name} ({len(image_bytes)} bytes) | Turno: {shift}. "
@@ -427,6 +589,28 @@ async def evolution_webhook(
         f"Turno={shift} | Status={audit_status} | Score={score} | Pontos={audit_points} | Operador={operator_name}"
     )
 
+    # 9.5. Se houver itens corrigíveis, cria tickets de pendência com TTL de 20 minutos
+    itens_corrigiveis = analysis.get("itens_corrigiveis", [])
+    if itens_corrigiveis:
+        try:
+            os.makedirs("media_tickets", exist_ok=True)
+            foto_origem_path = f"media_tickets/audit_{audit_record.id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jpg"
+            with open(foto_origem_path, "wb") as f:
+                f.write(image_bytes)
+
+            await criar_tickets_pendencia(
+                audit_id=audit_record.id,
+                store_id=store.id,
+                operator_id=operator_name,
+                setor=analysis.get("setor", "GERAL"),
+                itens_corrigiveis=itens_corrigiveis,
+                foto_path=foto_origem_path,
+                session=session,
+            )
+            logger.info(f"[Webhook Ticket] Ticket(s) de pendência criado(s) para {store.name} com expiração em 20 min.")
+        except Exception as e:
+            logger.error(f"[Webhook Ticket] Erro ao persistir tickets de pendência: {e}")
+
     # 10. Responde o feedback diretamente dentro do grupo da loja com tom educativo e gamificação
     msg_whatsapp = analysis.get("mensagem_whatsapp", "")
     if not msg_whatsapp:
@@ -445,7 +629,16 @@ async def evolution_webhook(
             "Responda a esta mensagem apenas com seu primeiro nome para pontuar no ranking!"
         )
 
-    group_reply = msg_whatsapp + operator_line
+    # Alerta de bônus por correção em até 20 minutos
+    if itens_corrigiveis:
+        correction_alert = (
+            "\n\n⏱️ *Ciclo de Correção Ativo (+25 pts):*\n"
+            "Corrija os apontamentos acima e envie nova foto deste setor nos próximos *20 minutos* para ganhar *+25 pontos de bônus* no ranking! 🚀"
+        )
+    else:
+        correction_alert = ""
+
+    group_reply = msg_whatsapp + operator_line + correction_alert
     await evolution_service.send_text_message(store.whatsapp_group_jid, group_reply)
 
     # 11. Alerta Executivo (Diretoria):
@@ -823,6 +1016,65 @@ async def upload_auditoria_live(
         f"| Operador: {cleaned_operator or 'Não informado'}."
     )
 
+    # Ciclo de Correção Antes/Depois via PWA
+    ticket_aberto = await buscar_ticket_aberto(store_id=store.id, session=session)
+    if ticket_aberto:
+        foto_antes_bytes = None
+        if ticket_aberto.foto_origem_path and os.path.exists(ticket_aberto.foto_origem_path):
+            try:
+                with open(ticket_aberto.foto_origem_path, "rb") as f:
+                    foto_antes_bytes = f.read()
+            except Exception:
+                pass
+        if not foto_antes_bytes:
+            foto_antes_bytes = b"foto_origem_antes_bytes"
+
+        comparacao = await gemini_service.comparar_correcao(
+            img_antes_bytes=foto_antes_bytes,
+            img_depois_bytes=image_bytes,
+            criterio_pendente=ticket_aberto.criterio,
+            descricao_falha=ticket_aberto.descricao_falha,
+        )
+
+        if comparacao.mesmo_setor and comparacao.problema_resolvido:
+            op_bonus = cleaned_operator or ticket_aberto.operator_id or "Equipe"
+            ticket_db, bonus_pts, aviso_teto = await aplicar_correcao_ticket(
+                session=session,
+                ticket_id=ticket_aberto.id,
+                store_id=store.id,
+                operator_name=op_bonus,
+                shift=resolve_shift(),
+            )
+
+            if bonus_pts > 0:
+                msg_correcao = (
+                    "✅ *CORREÇÃO VALIDADA COM SUCESSO!*\n"
+                    f"🏪 *Setor:* {ticket_aberto.setor}\n"
+                    f"🎯 *Problema resolvido:* {ticket_aberto.descricao_falha}\n"
+                    f"🏆 *Bônus:* +{bonus_pts} pontos creditados para *{op_bonus}*!"
+                )
+            else:
+                msg_correcao = (
+                    "✅ *CORREÇÃO VALIDADA COM SUCESSO!*\n"
+                    f"🏪 *Setor:* {ticket_aberto.setor}\n"
+                    f"🎯 *Problema resolvido:* {ticket_aberto.descricao_falha}\n"
+                    f"⚠️ *Aviso:* {aviso_teto or 'Limite de bônus de correção atingido para este turno'}."
+                )
+            await evolution_service.send_text_message(store.whatsapp_group_jid, msg_correcao)
+            return {
+                "status": "CORRIGIDO",
+                "approved": True,
+                "score": 10.0,
+                "points": float(bonus_pts),
+                "operator": op_bonus,
+                "shift": resolve_shift(),
+                "ticket_id": ticket_aberto.id,
+                "bonus": bonus_pts,
+                "aviso": aviso_teto,
+                "message": msg_correcao,
+                "detalhes": comparacao.detalhes_observados,
+            }
+
     # Análise pelo Gemini 2.0 Flash
     mime_type = file.content_type or "image/jpeg"
     analysis = await gemini_service.analyze_store_image(image_bytes, mime_type=mime_type)
@@ -898,6 +1150,28 @@ async def upload_auditoria_live(
         operator_name=cleaned_operator,
         points=audit_points,
     )
+
+    # Criação de tickets de pendência no PWA se houver itens corrigíveis
+    itens_corrigiveis = analysis.get("itens_corrigiveis", [])
+    if itens_corrigiveis:
+        try:
+            os.makedirs("media_tickets", exist_ok=True)
+            foto_origem_path = f"media_tickets/pwa_audit_{audit_record.id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jpg"
+            with open(foto_origem_path, "wb") as f:
+                f.write(image_bytes)
+
+            await criar_tickets_pendencia(
+                audit_id=audit_record.id,
+                store_id=store.id,
+                operator_id=cleaned_operator,
+                setor=analysis.get("setor", "GERAL"),
+                itens_corrigiveis=itens_corrigiveis,
+                foto_path=foto_origem_path,
+                session=session,
+            )
+            logger.info(f"[PWA Tickets] Ticket(s) de pendência criado(s) para {store.name} com expiração em 20 min.")
+        except Exception as e:
+            logger.error(f"[PWA Tickets] Erro ao persistir tickets de pendência: {e}")
 
     # Notifica o grupo da loja via Evolution API com tom educativo e pontos
     msg_whatsapp = analysis.get("mensagem_whatsapp")

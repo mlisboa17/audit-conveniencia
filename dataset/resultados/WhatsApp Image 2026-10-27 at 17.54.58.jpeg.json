@@ -1,0 +1,71 @@
+{
+  "arquivo": "WhatsApp Image 2026-10-27 at 17.54.58.jpeg",
+  "caminho_origem": "C:\\Projetos\\audit-conveniencia\\dataset\\WhatsApp Image 2026-10-27 at 17.54.58.jpeg",
+  "data_auditoria": "2026-10-27T23:15:34.599730",
+  "modelo_ia": "gemini-3.1-flash-lite",
+  "gatekeeper": {
+    "status": "Aprovado",
+    "aprovado": true,
+    "setor_detectado": "ESTUFA",
+    "confianca_percentual": 98
+  },
+  "perito_setorial": {
+    "setor": "ESTUFA",
+    "status_analise": "CONCLUIDA",
+    "nivel_confianca": 0.98,
+    "requer_revisao": false,
+    "elementos_visuais_detectados": [
+      "estufa térmica de vidro",
+      "bandejas de inox",
+      "salgados fritos e assados",
+      "plaquetas de preço",
+      "produtos embalados"
+    ],
+    "evidencias": [
+      {
+        "criterio": "limpeza",
+        "descricao": "vidros apresentam marcas de dedos e manchas de gordura, comprometendo a transparência",
+        "localizacao": "vidro frontal",
+        "conforme": false,
+        "severidade": "MEDIA"
+      },
+      {
+        "criterio": "organizacao",
+        "descricao": "salgados dispostos por tipo com plaquetas de identificação visíveis",
+        "localizacao": "prateleiras da estufa",
+        "conforme": true,
+        "severidade": "BAIXA"
+      },
+      {
+        "criterio": "apresentacao",
+        "descricao": "salgados com aspecto dourado e íntegro, sem sinais de deformação excessiva",
+        "localizacao": "bandejas de inox",
+        "conforme": true,
+        "severidade": "BAIXA"
+      }
+    ],
+    "acoes_recomendadas": [
+      "Realizar limpeza profunda nos vidros frontais para remover marcas de dedos e gordura",
+      "Organizar melhor a prateleira inferior, que contém produtos embalados misturados com salgados"
+    ]
+  },
+  "avaliacao_deterministica": {
+    "setor": "ESTUFA",
+    "nota_calculada": 5.0,
+    "status_analise": "CONCLUIDA",
+    "total_criterios_avaliados": 3,
+    "criterios_conformes": 2,
+    "requer_revisao": false,
+    "requer_acao_imediata": true,
+    "itens_corrigiveis": [
+      {
+        "criterio": "limpeza",
+        "descricao": "vidros apresentam marcas de dedos e manchas de gordura, comprometendo a transparência",
+        "localizacao": "vidro frontal",
+        "severidade": "MEDIA",
+        "acao_sugerida": "Realizar limpeza profunda nos vidros frontais para remover marcas de dedos e gordura"
+      }
+    ],
+    "resumo_operacional": "Setor ESTUFA: 2/3 conformes. 1 apontamento(s)."
+  }
+}
