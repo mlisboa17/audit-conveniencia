@@ -268,7 +268,7 @@ async def _evo_call(method: str, path: str, json_body: Optional[Dict[str, Any]] 
     import httpx
     url = f"{settings.EVOLUTION_API_URL.rstrip('/')}{path}"
     try:
-        async with httpx.AsyncClient(timeout=15) as c:
+        async with httpx.AsyncClient(timeout=45) as c:
             r = await c.request(method, url, headers={"apikey": settings.EVOLUTION_API_KEY}, json=json_body)
         try:
             body = r.json()
@@ -361,6 +361,12 @@ async def evolution_webhook(
     7. Se falha crítica (score < 60 ou ruptura), notifica o Diretor no privado.
     """
     event_name = (payload.get("event") or "").strip().lower()
+    _dbg_data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    _dbg_jid = (_dbg_data.get("key") or {}).get("remoteJid") if isinstance(_dbg_data.get("key"), dict) else None
+    logger.info(
+        f"[WEBHOOK] Recebido event='{event_name}' remoteJid={_dbg_jid} "
+        f"messageType={_dbg_data.get('messageType')}"
+    )
 
     # 1. Trata eventos operacionais de conexão/sistema sem disparar warnings
     if event_name and event_name != "messages.upsert":
@@ -403,14 +409,14 @@ async def evolution_webhook(
     # Localiza a loja através do JID do grupo
     store = await find_store_by_group_jid(session, remote_jid)
     if not store:
-        logger.info(f"[Webhook] Grupo {remote_jid} ignorado: grupo não cadastrado em nenhuma loja.")
+        logger.info(f"[WEBHOOK] Grupo não vinculado ignorado: {remote_jid}")
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={"status": "ignored", "reason": "unregistered_group", "group_jid": remote_jid},
         )
 
     logger.info(
-        f"[Webhook] Mensagem aceita do grupo '{store.name}' ({store.whatsapp_group_jid}) "
+        f"[WEBHOOK] Grupo reconhecido: {remote_jid} -> '{store.name}' "
         f"- Participante: {participant or 'Colaborador da loja'}"
     )
 
