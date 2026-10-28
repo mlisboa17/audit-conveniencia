@@ -389,11 +389,21 @@ Criação da infraestrutura para processamento em lote de fotos reais de conveni
 - **WhatsApp:** instância `conveniencia` criada e conectada; `/groups` retorna 13 grupos.
 - **Segurança:** chave antiga da Evolution removida do `.env.example`; nova chave em `EVOLUTION_API_KEY` = `AUTHENTICATION_API_KEY` (só no Easypanel).
 
+### ✅ Fluxo ponta a ponta validado (28/10/2026 04:35)
+WhatsApp → Evolution → webhook → Gemini → resposta no grupo funcionando.
+Primeira auditoria real: Loja 1, FREEZER_GELADEIRA, nota 7.0 (70 pts), feedback enviado ao grupo.
+
+**Causas raiz resolvidas:**
+- Evolution v2 lê `CACHE_REDIS_*` (não `REDIS_URI`); sem isso o cache ia para localhost e envio/recebimento travavam.
+- Startup sobrescrevia o grupo da Loja 1 (removido de `database.py`).
+- SQLite agora em volume `app_data` (`/data/app.db`).
+- Payload `sendText` no formato v2; webhook com URL pública + Base64; settings da instância todos `false`.
+- Grupos: Loja 1 → TESTES `120363424686005081@g.us`; Loja 2 → TESTES `120363431830583049@g.us`.
+
 ### ⏳ Pendente (próxima sessão)
-1. **Webhook não dispara:** foto enviada ao grupo não gerou processamento. Conferir na instância: URL `http://app:8000/webhook/evolution`, evento `MESSAGES_UPSERT`, Base64 ligado; checar logs do `app` e `evolution-api`.
-2. **Vincular lojas aos grupos** (`PUT /api/stores/{store_id}/group`).
-3. **Proteger rotas da API** (hoje `/groups`, `/api/*` e `/api/scheduler/trigger` estão públicas).
-4. **Persistir SQLite** (`app.db`) em volume — hoje se perde a cada deploy.
-5. **Repositório público temporariamente:** voltar para privado e usar `git@github.com:mlisboa17/audit-conveniencia.git` (deploy keys `easypanel` e `easypanel-2` já cadastradas).
+1. **URGENTE — proteger rotas:** `/debug/evolution/send-test` permite a qualquer um enviar mensagens pelo WhatsApp conectado; `/groups`, `/api/*`, `/debug/*` e `/api/scheduler/trigger` estão públicos.
+2. **Vincular as lojas reais** aos grupos operacionais (`PUT /api/stores/{store_id}/group`).
+3. **Número conectado = celular pessoal:** mensagens enviadas desse celular chegam como `fromMe` e são ignoradas. Ideal: número dedicado para o bot.
+4. **Repositório público temporariamente:** voltar para privado e usar `git@github.com:mlisboa17/audit-conveniencia.git` (deploy keys `easypanel` e `easypanel-2` já cadastradas).
 
 
