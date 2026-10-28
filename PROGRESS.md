@@ -375,3 +375,25 @@ Criação da infraestrutura para processamento em lote de fotos reais de conveni
   - **14/14 fotos auditadas com 100% de sucesso** consumindo a API oficial do Google Gemini.
   - Laudos estruturados e determinísticos salvos em `dataset/resultados/`.
 
+---
+
+## Deploy em Produção — Easypanel (Hostinger) — 28/10/2026
+
+### ✅ Concluído
+- **Infra:** `Dockerfile` (python:3.12-slim + uvicorn :8000), `.dockerignore`, `docker-compose.yml` sem `version`.
+- **Correções para subir:** `greenlet` e `python-multipart` no `requirements.txt`; import de `Tuple` em `database.py`.
+- **Postgres:** volume renomeado para `postgres_data_v2` (o antigo foi criado com a senha padrão).
+- **Easypanel:** serviço Compose `auditoria-lojas / auditoria-stack`, fonte Git `main`.
+  - App: `https://auditoria-lojas-auditoria-stack.h43pzs.easypanel.host` → serviço `app`, porta 8000 (`/docs` e `/groups` OK).
+  - Evolution: `https://evolution-auditoria-lojas.h43pzs.easypanel.host/manager` → serviço `evolution-api`, porta 8080.
+- **WhatsApp:** instância `conveniencia` criada e conectada; `/groups` retorna 13 grupos.
+- **Segurança:** chave antiga da Evolution removida do `.env.example`; nova chave em `EVOLUTION_API_KEY` = `AUTHENTICATION_API_KEY` (só no Easypanel).
+
+### ⏳ Pendente (próxima sessão)
+1. **Webhook não dispara:** foto enviada ao grupo não gerou processamento. Conferir na instância: URL `http://app:8000/webhook/evolution`, evento `MESSAGES_UPSERT`, Base64 ligado; checar logs do `app` e `evolution-api`.
+2. **Vincular lojas aos grupos** (`PUT /api/stores/{store_id}/group`).
+3. **Proteger rotas da API** (hoje `/groups`, `/api/*` e `/api/scheduler/trigger` estão públicas).
+4. **Persistir SQLite** (`app.db`) em volume — hoje se perde a cada deploy.
+5. **Repositório público temporariamente:** voltar para privado e usar `git@github.com:mlisboa17/audit-conveniencia.git` (deploy keys `easypanel` e `easypanel-2` já cadastradas).
+
+
