@@ -403,7 +403,7 @@ Primeira auditoria real: Loja 1, FREEZER_GELADEIRA, nota 7.0 (70 pts), feedback 
 ### ⏳ Pendente (próxima sessão)
 1. **URGENTE — proteger rotas:** `/debug/evolution/send-test` permite a qualquer um enviar mensagens pelo WhatsApp conectado; `/groups`, `/api/*`, `/debug/*` e `/api/scheduler/trigger` estão públicos.
 2. **Vincular as lojas reais** aos grupos operacionais (`PUT /api/stores/{store_id}/group`).
-3. **Número conectado = celular pessoal:** mensagens enviadas desse celular chegam como `fromMe` e são ignoradas. Ideal: número dedicado para o bot.
+3. ~~Número dedicado~~ — o bot já usa um telefone exclusivo (confirmado).
 4. **Repositório público temporariamente:** voltar para privado e usar `git@github.com:mlisboa17/audit-conveniencia.git` (deploy keys `easypanel` e `easypanel-2` já cadastradas).
 
 
