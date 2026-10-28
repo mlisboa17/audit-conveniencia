@@ -197,6 +197,70 @@ async def list_whatsapp_groups():
 
 
 # ==========================================================
+# DIAGNÓSTICO DO WEBHOOK (últimas chamadas em memória)
+# ==========================================================
+from collections import deque
+from fastapi.responses import Response as _RawResponse
+
+_WEBHOOK_DEBUG: "deque[Dict[str, Any]]" = deque(maxlen=30)
+
+
+def _resumir_payload_webhook(raw: bytes) -> Dict[str, Any]:
+    """Extrai apenas metadados do payload (sem base64/mídia) para diagnóstico."""
+    try:
+        p = json.loads(raw or b"{}")
+    except Exception:
+        return {"parse_error": True, "size": len(raw or b"")}
+    data = p.get("data", {}) if isinstance(p, dict) else {}
+    data = data if isinstance(data, dict) else {}
+    key = data.get("key", {}) if isinstance(data.get("key"), dict) else {}
+    msg = data.get("message", {}) if isinstance(data.get("message"), dict) else {}
+    img = msg.get("imageMessage", {}) if isinstance(msg.get("imageMessage"), dict) else {}
+    return {
+        "event": p.get("event") if isinstance(p, dict) else None,
+        "instance": p.get("instance") if isinstance(p, dict) else None,
+        "remoteJid": key.get("remoteJid"),
+        "fromMe": key.get("fromMe"),
+        "messageType": data.get("messageType"),
+        "message_keys": list(msg.keys())[:10],
+        "has_base64": bool(msg.get("base64") or img.get("base64")),
+        "has_image_url": bool(img.get("url") or data.get("mediaUrl")),
+        "size": len(raw or b""),
+    }
+
+
+@app.middleware("http")
+async def _registrar_webhook_debug(request: Request, call_next):
+    if request.url.path != "/webhook/evolution" or request.method != "POST":
+        return await call_next(request)
+    raw = await request.body()
+    entry: Dict[str, Any] = {"at": datetime.utcnow().isoformat(), **_resumir_payload_webhook(raw)}
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        entry.update({"status": 500, "error": repr(exc)[:500]})
+        _WEBHOOK_DEBUG.appendleft(entry)
+        raise
+    body = b""
+    async for chunk in response.body_iterator:
+        body += chunk
+    entry.update({"status": response.status_code, "response": body[:500].decode("utf-8", "ignore")})
+    _WEBHOOK_DEBUG.appendleft(entry)
+    return _RawResponse(
+        content=body,
+        status_code=response.status_code,
+        headers=dict(response.headers),
+        media_type=response.media_type,
+    )
+
+
+@app.get("/debug/webhooks", tags=["WhatsApp & Webhook"])
+async def debug_webhooks():
+    """Últimas chamadas recebidas em /webhook/evolution (apenas metadados, sem mídia)."""
+    return {"count": len(_WEBHOOK_DEBUG), "items": list(_WEBHOOK_DEBUG)}
+
+
+# ==========================================================
 # WEBHOOK EVOLUTION API (COM TRAVAS ANTI-FRAUDE)
 # ==========================================================
 
