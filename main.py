@@ -279,12 +279,22 @@ async def _evo_call(method: str, path: str, json_body: Optional[Dict[str, Any]] 
         return {"http": None, "error": repr(e)[:300]}
 
 
-WEBHOOK_INTERNAL_URL = "http://app:8000/webhook/evolution"
+WEBHOOK_PUBLIC_URL = "https://auditoria-lojas-auditoria-stack.h43pzs.easypanel.host/webhook/evolution"
+
+INSTANCE_SETTINGS_OFF = {
+    "rejectCall": False,
+    "msgCall": "",
+    "groupsIgnore": False,
+    "alwaysOnline": False,
+    "readMessages": False,
+    "syncFullHistory": False,
+    "readStatus": False,
+}
 
 
 @app.get("/debug/evolution", tags=["WhatsApp & Webhook"])
 async def debug_evolution():
-    """Estado da instância e configuração de webhook gravada na Evolution (usa a chave do servidor)."""
+    """Estado da instância, webhook e settings gravados na Evolution (usa a chave do servidor)."""
     inst = settings.EVOLUTION_INSTANCE_NAME
     return {
         "instance": inst,
@@ -292,26 +302,41 @@ async def debug_evolution():
         "api_key_configured": bool(settings.EVOLUTION_API_KEY),
         "connection_state": await _evo_call("GET", f"/instance/connectionState/{inst}"),
         "webhook": await _evo_call("GET", f"/webhook/find/{inst}"),
+        "settings": await _evo_call("GET", f"/settings/find/{inst}"),
     }
 
 
 @app.post("/debug/evolution/fix-webhook", tags=["WhatsApp & Webhook"])
-async def fix_evolution_webhook():
-    """Grava na instância o webhook correto (URL interna, MESSAGES_UPSERT, base64 ligado)."""
+async def fix_evolution_webhook(url: Optional[str] = None):
+    """Grava webhook (MESSAGES_UPSERT + base64) e desliga todos os comportamentos automáticos da instância."""
     inst = settings.EVOLUTION_INSTANCE_NAME
+    target = url or WEBHOOK_PUBLIC_URL
     body = {
         "webhook": {
             "enabled": True,
-            "url": WEBHOOK_INTERNAL_URL,
+            "url": target,
             "byEvents": False,
             "base64": True,
             "events": ["MESSAGES_UPSERT"],
         }
     }
     return {
-        "set": await _evo_call("POST", f"/webhook/set/{inst}", body),
-        "now": await _evo_call("GET", f"/webhook/find/{inst}"),
+        "webhook_set": await _evo_call("POST", f"/webhook/set/{inst}", body),
+        "settings_set": await _evo_call("POST", f"/settings/set/{inst}", INSTANCE_SETTINGS_OFF),
+        "webhook_now": await _evo_call("GET", f"/webhook/find/{inst}"),
+        "settings_now": await _evo_call("GET", f"/settings/find/{inst}"),
     }
+
+
+@app.post("/debug/evolution/send-test", tags=["WhatsApp & Webhook"])
+async def debug_send_test(jid: str, text: str = "🤖 Teste de envio do Bot de Auditoria"):
+    """Envia texto direto pela Evolution e devolve a resposta crua (para diagnosticar falhas de envio)."""
+    inst = settings.EVOLUTION_INSTANCE_NAME
+    return await _evo_call(
+        "POST",
+        f"/message/sendText/{inst}",
+        {"number": jid, "text": text, "delay": 500, "linkPreview": False},
+    )
 
 
 # ==========================================================

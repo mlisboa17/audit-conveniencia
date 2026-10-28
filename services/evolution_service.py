@@ -50,11 +50,8 @@ class EvolutionService:
         payload = {
             "number": cleaned_recipient,
             "text": text,
-            "options": {
-                "delay": 1000,
-                "presence": "composing",
-                "linkPreview": False,
-            },
+            "delay": 1000,
+            "linkPreview": False,
         }
 
         tipo_destinatario = "Grupo" if "@g.us" in cleaned_recipient else "Contato"

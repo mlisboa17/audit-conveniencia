@@ -85,11 +85,12 @@ class WhatsAppManager:
             "qrcode": True,
             "integration": "WHATSAPP-BAILEYS",
             "rejectCall": False,
-            "msgCall": "Chamadas nao suportadas neste canal operacional.",
+            "msgCall": "",
             "groupsIgnore": False,
-            "alwaysOnline": True,
-            "readMessages": True,
+            "alwaysOnline": False,
+            "readMessages": False,
             "readStatus": False,
+            "syncFullHistory": False,
         }
 
         async with httpx.AsyncClient(timeout=20.0) as client:
