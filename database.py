@@ -223,6 +223,64 @@ class AuditTicket(Base):
         )
 
 
+class AuditoriaImagem(Base):
+    """
+    Ciclo de vida de cada foto recebida: análise da IA, defesa do operador e julgamento da diretoria.
+    Status: PROCESSANDO, APROVADO, DIVERGENTE, CONTESTADO, JULGADO, INVALIDA, ERRO.
+    """
+
+    __tablename__ = "auditorias_imagem"
+
+    codigo: Mapped[str] = mapped_column(String(64), primary_key=True, index=True)  # 28102026_045012_LJ1_B4E1
+    store_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    group_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    sender_phone: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    caminho_arquivo: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="PROCESSANDO", nullable=False, index=True)
+    dados_ocr: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON da leitura da IA
+    nota_ia: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 0.0 a 10.0
+    audit_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # vínculo com audits.id
+
+    # Contestação / Defesa
+    defesa_texto: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    defesa_em: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Julgamento da Diretoria
+    status_julgamento: Mapped[str] = mapped_column(String(32), default="PENDENTE", nullable=False)
+    nota_diretoria: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    parecer_diretoria: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    julgado_em: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            c.name: (getattr(self, c.name).isoformat() if isinstance(getattr(self, c.name), datetime) else getattr(self, c.name))
+            for c in self.__table__.columns
+        }
+
+
+class TreinamentoIA(Base):
+    """Pares supervisionados (leitura da IA x decisão humana) para calibrar futuras avaliações."""
+
+    __tablename__ = "treinamento_ia"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    codigo_imagem: Mapped[str] = mapped_column(String(64), ForeignKey("auditorias_imagem.codigo"), nullable=False, index=True)
+    imagem_path: Mapped[str] = mapped_column(String(255), nullable=False)
+    leitura_ia: Mapped[str] = mapped_column(Text, nullable=False)
+    defesa_funcionario: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    decisao_diretoria: Mapped[str] = mapped_column(String(32), nullable=False)  # PROCEDE / NAO_PROCEDE
+    nota_diretoria: Mapped[int] = mapped_column(Integer, nullable=False)
+    feedback_humano: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            c.name: (getattr(self, c.name).isoformat() if isinstance(getattr(self, c.name), datetime) else getattr(self, c.name))
+            for c in self.__table__.columns
+        }
+
+
 def resolve_shift(dt: Optional[datetime] = None) -> str:
     """
     Resolve o turno operacional com base no horário:

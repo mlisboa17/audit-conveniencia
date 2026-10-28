@@ -5,6 +5,7 @@ Inclui travas anti-fraude (bloqueio de fotos encaminhadas), validação estrita 
 e rota PWA de captura ao vivo com trava no sensor de câmera do celular.
 """
 
+import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -20,10 +21,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+from utils.ui_formatters import (
+    JULGAMENTO_REGEX,
+    SEP,
+    extrair_codigo,
+    formatar_nota_visual,
+    gerar_codigo_imagem,
+)
 from database import (
     Alert,
     Audit,
     AuditTicket,
+    AuditoriaImagem,
+    TreinamentoIA,
     Operator,
     Store,
     async_session_factory,
@@ -68,6 +78,73 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("audit.main")
+
+# ---------- Pipeline de imagens ----------
+IMAGES_DIR = os.getenv("IMAGES_DIR", "/data/imagens")
+try:
+    os.makedirs(IMAGES_DIR, exist_ok=True)
+except Exception:
+    IMAGES_DIR = os.path.join("uploads", "imagens")
+    os.makedirs(IMAGES_DIR, exist_ok=True)
+
+_BG_TASKS: set = set()
+
+
+def _salvar_imagem(codigo: str, data: bytes) -> str:
+    path = os.path.join(IMAGES_DIR, f"{codigo}.jpg")
+    try:
+        with open(path, "wb") as f:
+            f.write(data or b"")
+    except Exception as e:
+        logger.warning(f"[Pipeline] Falha ao salvar imagem {path}: {e}")
+    return path
+
+
+async def _atualizar_auditoria_imagem(session, codigo, status, nota=None, dados=None, audit_id=None):
+    try:
+        row = await session.get(AuditoriaImagem, codigo)
+        if not row:
+            return
+        row.status = status
+        if nota is not None:
+            row.nota_ia = float(nota)
+        if dados is not None:
+            row.dados_ocr = json.dumps(dados, default=str, ensure_ascii=False)
+        if audit_id is not None and hasattr(row, "audit_id"):
+            row.audit_id = audit_id
+        await session.commit()
+    except Exception as e:
+        logger.warning(f"[Pipeline] Falha ao atualizar auditoria_imagem {codigo}: {e}")
+
+
+def _digitos(v) -> str:
+    return "".join(ch for ch in str(v or "").split("@")[0] if ch.isdigit())
+
+
+def _eh_diretor(payload: Dict[str, Any]) -> bool:
+    alvo = _digitos(settings.DIRECTOR_PHONE)
+    if not alvo:
+        return False
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    key = data.get("key") if isinstance(data.get("key"), dict) else {}
+    for c in (key.get("remoteJid"), key.get("remoteJidAlt"), key.get("senderPn"), data.get("sender"), payload.get("sender")):
+        d = _digitos(c)
+        if d and (d == alvo or d.endswith(alvo[-8:]) and len(d) >= 10):
+            return True
+    return False
+
+
+def _texto_citado(payload: Dict[str, Any]) -> str:
+    try:
+        msg = (payload.get("data") or {}).get("message") or {}
+        for v in msg.values():
+            if isinstance(v, dict) and isinstance(v.get("contextInfo"), dict):
+                q = v["contextInfo"].get("quotedMessage") or {}
+                return json.dumps(q, ensure_ascii=False)
+        ctx = (payload.get("data") or {}).get("contextInfo") or {}
+        return json.dumps(ctx.get("quotedMessage") or {}, ensure_ascii=False)
+    except Exception:
+        return ""
 
 
 @asynccontextmanager
@@ -398,6 +475,48 @@ async def evolution_webhook(
             content={"status": "ignored", "reason": "remote_jid_not_found"},
         )
 
+    # 3.5. Julgamento da Diretoria (mensagem privada do DIRECTOR_PHONE)
+    if not is_group and _eh_diretor(payload):
+        texto_dir = (evolution_service.extract_text_message(payload) or "").strip().strip("`*_ ")
+        m = JULGAMENTO_REGEX.search(texto_dir)
+        if m:
+            codigo_j = m.group("codigo").upper()
+            decisao_raw = m.group("decisao").upper()
+            nota_j = max(0, min(10, int(m.group("nota"))))
+            parecer = (m.group("motivo") or "").strip().strip("`")
+            procede = decisao_raw in ("SIM", "PROCEDE")
+            reg = await session.get(AuditoriaImagem, codigo_j)
+            if not reg:
+                await evolution_service.send_text_message(settings.DIRECTOR_PHONE, f"⚠️ Ref `{codigo_j}` não encontrada.")
+                return JSONResponse(status_code=200, content={"status": "judgment_not_found", "codigo": codigo_j})
+            reg.status = "JULGADO"
+            reg.status_julgamento = "PROCEDE" if procede else "NAO_PROCEDE"
+            reg.nota_diretoria = nota_j
+            reg.parecer_diretoria = parecer or None
+            reg.julgado_em = datetime.utcnow()
+            session.add(TreinamentoIA(
+                codigo_imagem=reg.codigo,
+                imagem_path=reg.caminho_arquivo,
+                leitura_ia=reg.dados_ocr or "{}",
+                defesa_funcionario=reg.defesa_texto,
+                decisao_diretoria=reg.status_julgamento,
+                nota_diretoria=nota_j,
+                feedback_humano=parecer or None,
+            ))
+            await session.commit()
+            veredito = "🟢 PROCEDE (APROVADO)" if procede else "🔴 NÃO PROCEDE (NEGADO)"
+            await evolution_service.send_text_message(
+                reg.group_id,
+                "📢 *DECISÃO DA DIRETORIA*\n"
+                f"{SEP}\n"
+                f"🏷️ *Ref:* `{reg.codigo}`\n"
+                f"⚖️ *Veredito:* {veredito}\n\n"
+                f"{formatar_nota_visual(nota_j)}\n\n"
+                f"📝 *Observação:* _{parecer or 'Sem observações.'}_",
+            )
+            await evolution_service.send_text_message(settings.DIRECTOR_PHONE, "✅ Julgamento registrado e grupo notificado.")
+            return JSONResponse(status_code=200, content={"status": "judged", "codigo": reg.codigo, "decisao": reg.status_julgamento, "nota": nota_j})
+
     # Regra: Aceita apenas mensagens vindas de grupos (@g.us)
     if not is_group:
         logger.info(f"[Webhook] Mensagem de {remote_jid} ignorada: não provém de um grupo (@g.us).")
@@ -447,6 +566,60 @@ async def evolution_webhook(
         text_content = evolution_service.extract_text_message(payload)
         if text_content:
             clean_cmd = text_content.strip().lower()
+
+            # Caso 0: Defesa do operador (DEFESA: ...)
+            if clean_cmd.startswith("defesa"):
+                defesa = text_content.strip()[6:].lstrip(" :-").strip()
+                codigo_d = extrair_codigo(text_content) or extrair_codigo(_texto_citado(payload))
+                reg = await session.get(AuditoriaImagem, codigo_d) if codigo_d else None
+                if not reg:
+                    res = await session.execute(
+                        select(AuditoriaImagem)
+                        .where(AuditoriaImagem.store_id == store.id, AuditoriaImagem.status == "DIVERGENTE")
+                        .order_by(AuditoriaImagem.created_at.desc())
+                        .limit(1)
+                    )
+                    reg = res.scalars().first()
+                if not reg or reg.store_id != store.id:
+                    await evolution_service.send_text_message(
+                        store.whatsapp_group_jid,
+                        "⚠️ Não encontrei foto divergente para contestar. Responda à mensagem do resultado com `DEFESA: sua justificativa`.",
+                    )
+                    return JSONResponse(status_code=200, content={"status": "defense_not_found"})
+                if codigo_d:
+                    defesa = defesa.replace(codigo_d, "").strip(" :-")
+                reg.defesa_texto = defesa or "(sem texto)"
+                reg.defesa_em = datetime.utcnow()
+                reg.status = "CONTESTADO"
+                await session.commit()
+                await evolution_service.send_text_message(
+                    store.whatsapp_group_jid,
+                    "✅ *DEFESA REGISTRADA COM SUCESSO*\n"
+                    f"{SEP}\n"
+                    f"🏷️ *Ref:* `{reg.codigo}`\n"
+                    "Sua justificativa foi protocolada e enviada para a Diretoria avaliar.",
+                )
+                resumo = ""
+                try:
+                    d = json.loads(reg.dados_ocr or "{}")
+                    resumo = d.get("orientacao") or ", ".join(d.get("problemas") or []) if isinstance(d, dict) else ""
+                except Exception:
+                    pass
+                await evolution_service.send_text_message(
+                    settings.DIRECTOR_PHONE,
+                    "🚨 *CONTESTAÇÃO DE AUDITORIA*\n"
+                    f"{SEP}\n"
+                    f"🏪 *Loja:* {store.name}\n"
+                    f"👤 *Operador:* {participant or reg.sender_phone or 'Não identificado'}\n"
+                    f"🏷️ *Ref:* `{reg.codigo}`\n\n"
+                    f"🗣️ *Defesa:* _{reg.defesa_texto}_\n\n"
+                    f"🤖 *Nota IA:*\n{formatar_nota_visual(reg.nota_ia or 0)}\n"
+                    f"📋 *Resumo IA:* {resumo or 'N/A'}\n\n"
+                    "Para julgar, responda:\n"
+                    f"`{reg.codigo} SIM 8 motivo`\n"
+                    f"`{reg.codigo} NAO 2 motivo`",
+                )
+                return JSONResponse(status_code=200, content={"status": "defense_registered", "codigo": reg.codigo})
 
             # Caso A: Comando de consulta de Ranking (!ranking ou ranking)
             if clean_cmd in ("!ranking", "ranking"):
@@ -579,283 +752,361 @@ async def evolution_webhook(
             content={"status": "received", "reason": "no_actionable_message", "message_type": tipo_msg, "reply_sent": bool(sent)},
         )
 
-    # 5.5. Aviso imediato de recebimento (a análise pode levar alguns segundos)
+    # 5.5. Registro imediato + aviso visual de processamento (análise roda em background)
+    codigo_imagem = gerar_codigo_imagem(store.id)
+    caminho_img = _salvar_imagem(codigo_imagem, image_bytes)
+    sender_digits = "".join(ch for ch in str(participant or "") if ch.isdigit())[:32] or None
+    session.add(AuditoriaImagem(
+        codigo=codigo_imagem,
+        store_id=store.id,
+        group_id=store.whatsapp_group_jid,
+        sender_phone=sender_digits,
+        caminho_arquivo=caminho_img,
+        status="PROCESSANDO",
+    ))
+    await session.commit()
     await evolution_service.send_text_message(
         store.whatsapp_group_jid,
-        "📸 *Foto recebida!* Analisando... ⏳ Em instantes envio o resultado.",
+        "⏳ *PROCESSANDO FOTO*\n"
+        f"{SEP}\n"
+        f"📸 *Ref:* `{codigo_imagem}`\n"
+        f"🏪 *Loja:* {store.name}\n"
+        f"🕒 *Recebido:* {datetime.now().strftime('%H:%M')}\n\n"
+        "_Aguarde... estou analisando o setor._",
     )
+    _store_id = store.id
+    _group_jid = store.whatsapp_group_jid
 
-    # 6. Identificação de Operador via Legenda da Imagem (se houver)
-    caption_text = evolution_service.extract_caption(payload)
-    operator_name = evolution_service.extract_operator_name_from_text(caption_text)
-    if operator_name:
-        logger.info(f"[Webhook] Operador identificado via legenda da foto: '{operator_name}'.")
-
-    # Determina o turno dinamicamente via resolve_shift
-    now = datetime.now()
-    shift = resolve_shift(now)
-    today = date.today()
-
-    # 6.5. Ciclo de Correção Antes/Depois: Interceptação de Tickets de Pendência Abertos
-    ticket_aberto = await buscar_ticket_aberto(store_id=store.id, session=session)
-    if ticket_aberto:
-        logger.info(
-            f"[Webhook Ticket] Encontrado ticket de pendência #{ticket_aberto.id} aberto para {store.name} "
-            f"(Setor: {ticket_aberto.setor} | Falha: '{ticket_aberto.descricao_falha}'). "
-            "Iniciando comparação visual Antes vs Depois..."
-        )
-
-        foto_antes_bytes = None
-        if ticket_aberto.foto_origem_path and os.path.exists(ticket_aberto.foto_origem_path):
-            try:
-                with open(ticket_aberto.foto_origem_path, "rb") as f:
-                    foto_antes_bytes = f.read()
-            except Exception as e:
-                logger.warning(f"[Webhook Ticket] Não foi possível ler foto anterior em {ticket_aberto.foto_origem_path}: {e}")
-
-        if not foto_antes_bytes:
-            foto_antes_bytes = b"foto_origem_antes_bytes"
-
-        comparacao = await gemini_service.comparar_correcao(
-            img_antes_bytes=foto_antes_bytes,
-            img_depois_bytes=image_bytes,
-            criterio_pendente=ticket_aberto.criterio,
-            descricao_falha=ticket_aberto.descricao_falha,
-        )
-
-        if comparacao.mesmo_setor and comparacao.problema_resolvido:
-            op_bonus = operator_name or ticket_aberto.operator_id or "Equipe"
-            ticket_db, bonus_pts, aviso_teto = await aplicar_correcao_ticket(
-                session=session,
-                ticket_id=ticket_aberto.id,
-                store_id=store.id,
-                operator_name=op_bonus,
-                shift=shift,
-            )
-
-            logger.info(
-                f"[Webhook Ticket] Correção VALIDADA para o ticket #{ticket_aberto.id}! "
-                f"Bônus: +{bonus_pts} pts para {op_bonus} (Aviso: {aviso_teto or 'Nenhum'})."
-            )
-
-            if bonus_pts > 0:
-                msg_correcao = (
-                    "✅ *CORREÇÃO VALIDADA COM SUCESSO!*\n"
-                    f"🏪 *Setor:* {ticket_aberto.setor}\n"
-                    f"🎯 *Problema resolvido:* {ticket_aberto.descricao_falha}\n"
-                    f"🏆 *Bônus:* +{bonus_pts} pontos creditados para *{op_bonus}*!"
-                )
-            else:
-                msg_correcao = (
-                    "✅ *CORREÇÃO VALIDADA COM SUCESSO!*\n"
-                    f"🏪 *Setor:* {ticket_aberto.setor}\n"
-                    f"🎯 *Problema resolvido:* {ticket_aberto.descricao_falha}\n"
-                    f"⚠️ *Aviso:* {aviso_teto or 'Limite de bônus de correção atingido para este turno'}."
-                )
-            await evolution_service.send_text_message(store.whatsapp_group_jid, msg_correcao)
-
-            return JSONResponse(
-                status_code=status.HTTP_200_OK,
-                content={
-                    "status": "ticket_corrected",
-                    "store": store.name,
-                    "ticket_id": ticket_aberto.id,
-                    "bonus": bonus_pts,
-                    "operator": op_bonus,
-                    "aviso": aviso_teto,
-                    "detalhes": comparacao.detalhes_observados,
-                },
-            )
-        else:
-            logger.info(
-                f"[Webhook Ticket] Foto não validou o ticket #{ticket_aberto.id} "
-                f"(mesmo_setor={comparacao.mesmo_setor}, resolvido={comparacao.problema_resolvido}). "
-                "Seguindo com o fluxo padrão de auditoria independente."
-            )
-
-    logger.info(
-        f"[Webhook] Foto recebida do grupo de {store.name} ({len(image_bytes)} bytes) | Turno: {shift}. "
-        f"Acionando Gemini 2.0 Flash..."
-    )
-
-    # 7. Análise visual multimodal com Gemini 2.0 Flash (incluindo validação de ambiente)
-    analysis = await gemini_service.analyze_store_image(image_bytes, mime_type=mime_type)
-    analysis_status = analysis.get("status", "OK")
-    score = analysis.get("score", 0.0)
-    aprovado = analysis.get("aprovado", False)
-    problemas = analysis.get("problemas", [])
-    orientacao = analysis.get("orientacao", "")
-    motivo = analysis.get("motivo", "")
-
-    # Log detalhado do serviço avaliador determinístico (Perito Visual -> Juiz)
-    avaliacao = analysis.get("avaliacao")
-    if avaliacao:
-        logger.info(
-            f"[Evaluator] Avaliação determinística: Setor={avaliacao.get('setor')} | "
-            f"Nota={avaliacao.get('nota_calculada')} | "
-            f"Conformes={avaliacao.get('criterios_conformes')}/{avaliacao.get('total_criterios_avaliados')} | "
-            f"Ação Imediata={avaliacao.get('requer_acao_imediata')} | "
-            f"Itens Corrigíveis={len(avaliacao.get('itens_corrigiveis', []))}"
-        )
-
-    # Validação Estrita de Objeto e Ambiente
-    if analysis_status == "INVALID_OBJECT":
-        logger.warning(
-            f"[Webhook] Foto rejeitada em {store.name}: imagem fora do padrão da conveniência. "
-            f"Motivo: {motivo}"
-        )
-        await save_audit(
-            session=session,
-            store_id=store.id,
-            audit_date=today,
-            shift=shift,
-            status="INVALID_OBJECT",
-            score=0.0,
-            ai_analysis=json.dumps(analysis, ensure_ascii=False),
-            image_url=image_ref or "whatsapp_group_media",
-            operator_name=operator_name,
-            points=0.0,
-        )
-        invalid_reply = (
-            "❌ *Foto Inválida:* O sistema identificou que a imagem não pertence a uma área da conveniência "
-            "(geladeiras, gôndolas, estufa, banheiro ou caixa). Por favor, envie uma foto válida do setor auditado."
-        )
-        await evolution_service.send_text_message(store.whatsapp_group_jid, invalid_reply)
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={
-                "status": "invalid_object",
-                "store": store.name,
-                "motivo": motivo,
-                "reason": "image_not_store_environment",
-            },
-        )
-
-    # 8. Cálculo de pontos da rodada e gamificação
-    audit_points = calculate_audit_points(score, now)
-
-    # Se operador foi identificado na legenda, credita pontos imediatamente
-    if operator_name and audit_points > 0:
-        await add_points_to_operator(session, store.id, operator_name, audit_points)
-
-    # 9. Salva auditoria válida (OK ou ALERT)
-    audit_status = "OK" if aprovado else "ALERT"
-    audit_record = await save_audit(
-        session=session,
-        store_id=store.id,
-        audit_date=today,
-        shift=shift,
-        status=audit_status,
-        score=score,
-        ai_analysis=json.dumps(analysis, ensure_ascii=False),
-        image_url=image_ref or "whatsapp_group_media",
-        operator_name=operator_name,
-        points=audit_points,
-    )
-    logger.info(
-        f"[Webhook] Auditoria salva: ID={audit_record.id} | Loja={store.name} | "
-        f"Turno={shift} | Status={audit_status} | Score={score} | Pontos={audit_points} | Operador={operator_name}"
-    )
-
-    # 9.5. Se houver itens corrigíveis, cria tickets de pendência com TTL de 20 minutos
-    itens_corrigiveis = analysis.get("itens_corrigiveis", [])
-    if itens_corrigiveis:
+    async def _pipeline_foto():
         try:
-            os.makedirs("media_tickets", exist_ok=True)
-            foto_origem_path = f"media_tickets/audit_{audit_record.id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jpg"
-            with open(foto_origem_path, "wb") as f:
-                f.write(image_bytes)
+            async with async_session_factory() as session:
+                store = await session.get(Store, _store_id)
+                # 6. Identificação de Operador via Legenda da Imagem (se houver)
+                caption_text = evolution_service.extract_caption(payload)
+                operator_name = evolution_service.extract_operator_name_from_text(caption_text)
+                if operator_name:
+                    logger.info(f"[Webhook] Operador identificado via legenda da foto: '{operator_name}'.")
 
-            await criar_tickets_pendencia(
-                audit_id=audit_record.id,
-                store_id=store.id,
-                operator_id=operator_name,
-                setor=analysis.get("setor", "GERAL"),
-                itens_corrigiveis=itens_corrigiveis,
-                foto_path=foto_origem_path,
-                session=session,
+                # Determina o turno dinamicamente via resolve_shift
+                now = datetime.now()
+                shift = resolve_shift(now)
+                today = date.today()
+
+                # 6.5. Ciclo de Correção Antes/Depois: Interceptação de Tickets de Pendência Abertos
+                ticket_aberto = await buscar_ticket_aberto(store_id=store.id, session=session)
+                if ticket_aberto:
+                    logger.info(
+                        f"[Webhook Ticket] Encontrado ticket de pendência #{ticket_aberto.id} aberto para {store.name} "
+                        f"(Setor: {ticket_aberto.setor} | Falha: '{ticket_aberto.descricao_falha}'). "
+                        "Iniciando comparação visual Antes vs Depois..."
+                    )
+
+                    foto_antes_bytes = None
+                    if ticket_aberto.foto_origem_path and os.path.exists(ticket_aberto.foto_origem_path):
+                        try:
+                            with open(ticket_aberto.foto_origem_path, "rb") as f:
+                                foto_antes_bytes = f.read()
+                        except Exception as e:
+                            logger.warning(f"[Webhook Ticket] Não foi possível ler foto anterior em {ticket_aberto.foto_origem_path}: {e}")
+
+                    if not foto_antes_bytes:
+                        foto_antes_bytes = b"foto_origem_antes_bytes"
+
+                    comparacao = await gemini_service.comparar_correcao(
+                        img_antes_bytes=foto_antes_bytes,
+                        img_depois_bytes=image_bytes,
+                        criterio_pendente=ticket_aberto.criterio,
+                        descricao_falha=ticket_aberto.descricao_falha,
+                    )
+
+                    if comparacao.mesmo_setor and comparacao.problema_resolvido:
+                        op_bonus = operator_name or ticket_aberto.operator_id or "Equipe"
+                        ticket_db, bonus_pts, aviso_teto = await aplicar_correcao_ticket(
+                            session=session,
+                            ticket_id=ticket_aberto.id,
+                            store_id=store.id,
+                            operator_name=op_bonus,
+                            shift=shift,
+                        )
+
+                        logger.info(
+                            f"[Webhook Ticket] Correção VALIDADA para o ticket #{ticket_aberto.id}! "
+                            f"Bônus: +{bonus_pts} pts para {op_bonus} (Aviso: {aviso_teto or 'Nenhum'})."
+                        )
+
+                        if bonus_pts > 0:
+                            msg_correcao = (
+                                "✅ *CORREÇÃO VALIDADA COM SUCESSO!*\n"
+                                f"🏪 *Setor:* {ticket_aberto.setor}\n"
+                                f"🎯 *Problema resolvido:* {ticket_aberto.descricao_falha}\n"
+                                f"🏆 *Bônus:* +{bonus_pts} pontos creditados para *{op_bonus}*!"
+                            )
+                        else:
+                            msg_correcao = (
+                                "✅ *CORREÇÃO VALIDADA COM SUCESSO!*\n"
+                                f"🏪 *Setor:* {ticket_aberto.setor}\n"
+                                f"🎯 *Problema resolvido:* {ticket_aberto.descricao_falha}\n"
+                                f"⚠️ *Aviso:* {aviso_teto or 'Limite de bônus de correção atingido para este turno'}."
+                            )
+                        await _atualizar_auditoria_imagem(session, codigo_imagem, status="APROVADO", nota=10.0, dados=comparacao.__dict__ if hasattr(comparacao, "__dict__") else None)
+                        msg_correcao = f"🏷️ *Ref:* `{codigo_imagem}`\n" + msg_correcao
+                        await evolution_service.send_text_message(store.whatsapp_group_jid, msg_correcao)
+
+                        return JSONResponse(
+                            status_code=status.HTTP_200_OK,
+                            content={
+                                "status": "ticket_corrected",
+                                "store": store.name,
+                                "ticket_id": ticket_aberto.id,
+                                "bonus": bonus_pts,
+                                "operator": op_bonus,
+                                "aviso": aviso_teto,
+                                "detalhes": comparacao.detalhes_observados,
+                            },
+                        )
+                    else:
+                        logger.info(
+                            f"[Webhook Ticket] Foto não validou o ticket #{ticket_aberto.id} "
+                            f"(mesmo_setor={comparacao.mesmo_setor}, resolvido={comparacao.problema_resolvido}). "
+                            "Seguindo com o fluxo padrão de auditoria independente."
+                        )
+
+                logger.info(
+                    f"[Webhook] Foto recebida do grupo de {store.name} ({len(image_bytes)} bytes) | Turno: {shift}. "
+                    f"Acionando Gemini 2.0 Flash..."
+                )
+
+                # 7. Análise visual multimodal com Gemini 2.0 Flash (incluindo validação de ambiente)
+                analysis = await gemini_service.analyze_store_image(image_bytes, mime_type=mime_type)
+                analysis_status = analysis.get("status", "OK")
+                score = analysis.get("score", 0.0)
+                aprovado = analysis.get("aprovado", False)
+                problemas = analysis.get("problemas", [])
+                orientacao = analysis.get("orientacao", "")
+                motivo = analysis.get("motivo", "")
+
+                # Log detalhado do serviço avaliador determinístico (Perito Visual -> Juiz)
+                avaliacao = analysis.get("avaliacao")
+                if avaliacao:
+                    logger.info(
+                        f"[Evaluator] Avaliação determinística: Setor={avaliacao.get('setor')} | "
+                        f"Nota={avaliacao.get('nota_calculada')} | "
+                        f"Conformes={avaliacao.get('criterios_conformes')}/{avaliacao.get('total_criterios_avaliados')} | "
+                        f"Ação Imediata={avaliacao.get('requer_acao_imediata')} | "
+                        f"Itens Corrigíveis={len(avaliacao.get('itens_corrigiveis', []))}"
+                    )
+
+                # Validação Estrita de Objeto e Ambiente
+                if analysis_status == "INVALID_OBJECT":
+                    logger.warning(
+                        f"[Webhook] Foto rejeitada em {store.name}: imagem fora do padrão da conveniência. "
+                        f"Motivo: {motivo}"
+                    )
+                    await save_audit(
+                        session=session,
+                        store_id=store.id,
+                        audit_date=today,
+                        shift=shift,
+                        status="INVALID_OBJECT",
+                        score=0.0,
+                        ai_analysis=json.dumps(analysis, ensure_ascii=False),
+                        image_url=image_ref or "whatsapp_group_media",
+                        operator_name=operator_name,
+                        points=0.0,
+                    )
+                    await _atualizar_auditoria_imagem(session, codigo_imagem, status="INVALIDA", nota=0.0, dados=analysis)
+                    invalid_reply = (
+                        f"❌ *Foto Inválida* — Ref: `{codigo_imagem}`\n"
+                        "O sistema identificou que a imagem não pertence a uma área da conveniência "
+                        "(geladeiras, gôndolas, estufa, banheiro ou caixa). Por favor, envie uma foto válida do setor auditado."
+                    )
+                    await evolution_service.send_text_message(store.whatsapp_group_jid, invalid_reply)
+                    return JSONResponse(
+                        status_code=status.HTTP_200_OK,
+                        content={
+                            "status": "invalid_object",
+                            "store": store.name,
+                            "motivo": motivo,
+                            "reason": "image_not_store_environment",
+                        },
+                    )
+
+                # 8. Cálculo de pontos da rodada e gamificação
+                audit_points = calculate_audit_points(score, now)
+
+                # Se operador foi identificado na legenda, credita pontos imediatamente
+                if operator_name and audit_points > 0:
+                    await add_points_to_operator(session, store.id, operator_name, audit_points)
+
+                # 9. Salva auditoria válida (OK ou ALERT)
+                audit_status = "OK" if aprovado else "ALERT"
+                audit_record = await save_audit(
+                    session=session,
+                    store_id=store.id,
+                    audit_date=today,
+                    shift=shift,
+                    status=audit_status,
+                    score=score,
+                    ai_analysis=json.dumps(analysis, ensure_ascii=False),
+                    image_url=image_ref or "whatsapp_group_media",
+                    operator_name=operator_name,
+                    points=audit_points,
+                )
+                logger.info(
+                    f"[Webhook] Auditoria salva: ID={audit_record.id} | Loja={store.name} | "
+                    f"Turno={shift} | Status={audit_status} | Score={score} | Pontos={audit_points} | Operador={operator_name}"
+                )
+
+                # 9.5. Se houver itens corrigíveis, cria tickets de pendência com TTL de 20 minutos
+                itens_corrigiveis = analysis.get("itens_corrigiveis", [])
+                if itens_corrigiveis:
+                    try:
+                        os.makedirs("media_tickets", exist_ok=True)
+                        foto_origem_path = f"media_tickets/audit_{audit_record.id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jpg"
+                        with open(foto_origem_path, "wb") as f:
+                            f.write(image_bytes)
+
+                        await criar_tickets_pendencia(
+                            audit_id=audit_record.id,
+                            store_id=store.id,
+                            operator_id=operator_name,
+                            setor=analysis.get("setor", "GERAL"),
+                            itens_corrigiveis=itens_corrigiveis,
+                            foto_path=foto_origem_path,
+                            session=session,
+                        )
+                        logger.info(f"[Webhook Ticket] Ticket(s) de pendência criado(s) para {store.name} com expiração em 20 min.")
+                    except Exception as e:
+                        logger.error(f"[Webhook Ticket] Erro ao persistir tickets de pendência: {e}")
+
+                # 10. Responde o feedback diretamente dentro do grupo da loja com tom educativo e gamificação
+                msg_whatsapp = analysis.get("mensagem_whatsapp", "")
+                if not msg_whatsapp:
+                    msg_whatsapp = (
+                        "Audit aprovado! Loja 100% pronta pro pico."
+                        if aprovado
+                        else f"Atenção: identificado {', '.join(problemas)}. Favor puxar a frente e repor agora."
+                    )
+
+                # Complementa a mensagem com o crédito de pontos ou a chamada rápida de identificação
+                if operator_name:
+                    operator_line = f"\n\n👤 *Operador(a):* {operator_name} (+{int(audit_points)} pts no ranking!)"
+                else:
+                    operator_line = (
+                        "\n\n👤 *Quem realizou esta auditoria?* "
+                        "Responda a esta mensagem apenas com seu primeiro nome para pontuar no ranking!"
+                    )
+
+                # Alerta de bônus por correção em até 20 minutos
+                if itens_corrigiveis:
+                    correction_alert = (
+                        "\n\n⏱️ *Ciclo de Correção Ativo (+25 pts):*\n"
+                        "Corrija os apontamentos acima e envie nova foto deste setor nos próximos *20 minutos* para ganhar *+25 pontos de bônus* no ranking! 🚀"
+                    )
+                else:
+                    correction_alert = ""
+
+                # 10.5. Ficha visual com código de referência + semáforo de nota (e convite à defesa se < 8)
+                divergente = float(score or 0.0) < 8.0
+                await _atualizar_auditoria_imagem(
+                    session, codigo_imagem,
+                    status="DIVERGENTE" if divergente else "APROVADO",
+                    nota=float(score or 0.0), dados=analysis, audit_id=audit_record.id,
+                )
+                if divergente:
+                    motivo_div = "; ".join(problemas) if problemas else (orientacao or "Inconformidades no setor")
+                    cabecalho = (
+                        "⚠️ *ATENÇÃO: DIVERGÊNCIA DETECTADA*\n"
+                        f"{SEP}\n"
+                        f"📌 *Ref:* `{codigo_imagem}`\n"
+                        f"🔍 *Diagnóstico:* {motivo_div}\n\n"
+                        f"{formatar_nota_visual(score)}\n"
+                        f"{SEP}\n"
+                    )
+                    defesa_box = (
+                        "\n\n💬 *O que fazer agora?*\n"
+                        "Se a avaliação estiver errada, responda esta mensagem dizendo:\n"
+                        "👉 *DEFESA:* _sua explicação detalhada aqui_"
+                    )
+                else:
+                    cabecalho = (
+                        "✅ *AUDITORIA REGULAR*\n"
+                        f"{SEP}\n"
+                        f"🏷️ *Ref:* `{codigo_imagem}`\n\n"
+                        f"{formatar_nota_visual(score)}\n"
+                        f"{SEP}\n"
+                    )
+                    defesa_box = ""
+
+                group_reply = cabecalho + msg_whatsapp + operator_line + correction_alert + defesa_box
+                await evolution_service.send_text_message(store.whatsapp_group_jid, group_reply)
+
+                # 11. Alerta Executivo (Diretoria):
+                has_rupture = any("ruptura" in p.lower() or "vazio" in p.lower() for p in problemas)
+                is_critical_failure = (score < 6.0) or (not aprovado and has_rupture)
+
+                if is_critical_failure:
+                    setor_nome = analysis.get("setor", "SETOR OPERACIONAL")
+                    logger.warning(
+                        f"[Webhook] Falha grave detectada no grupo de {store.name} (Setor: {setor_nome} | Nota: {score}/10). "
+                        f"Notificando Diretoria..."
+                    )
+                    director_msg = (
+                        f"🚨 Alerta Operacional Diretoria - {store.name} ({setor_nome}):\n"
+                        f"Turno: {shift}\n"
+                        f"Nota IA: {score}/10 (REPROVADO)\n"
+                        f"Problemas: {', '.join(problemas) if problemas else 'Ruptura ou desorganização grave'}\n"
+                        f"Operador: {operator_name or 'Não informado'}\n"
+                        f"Grupo: {store.whatsapp_group_jid}\n"
+                        f"Gerente Responsável: {store.manager_name} ({store.manager_phone or 'N/A'})\n"
+                        f"Status: Equipe orientada no grupo para correção imediata."
+                    )
+
+                    await evolution_service.send_text_message(settings.DIRECTOR_PHONE, director_msg)
+
+                    await save_alert(
+                        session=session,
+                        store_id=store.id,
+                        message=director_msg,
+                        sent_to_director=True,
+                    )
+
+                return JSONResponse(
+                    status_code=status.HTTP_200_OK,
+                    content={
+                        "status": "success",
+                        "store": store.name,
+                        "group_jid": store.whatsapp_group_jid,
+                        "audit_id": audit_record.id,
+                        "shift": shift,
+                        "score": score,
+                        "points": audit_points,
+                        "operator": operator_name,
+                        "approved": aprovado,
+                        "problemas": problemas,
+                        "orientacao": orientacao,
+                        "group_feedback_sent": True,
+                        "director_alerted": is_critical_failure,
+                    },
+                )
+        except Exception:
+            logger.exception(f"[Pipeline] Falha ao analisar foto {codigo_imagem}")
+            try:
+                async with async_session_factory() as s2:
+                    await _atualizar_auditoria_imagem(s2, codigo_imagem, status="ERRO")
+            except Exception:
+                logger.exception("[Pipeline] Falha ao marcar ERRO")
+            await evolution_service.send_text_message(
+                _group_jid,
+                f"⚠️ Não consegui concluir a análise da foto `{codigo_imagem}`. Envie novamente.",
             )
-            logger.info(f"[Webhook Ticket] Ticket(s) de pendência criado(s) para {store.name} com expiração em 20 min.")
-        except Exception as e:
-            logger.error(f"[Webhook Ticket] Erro ao persistir tickets de pendência: {e}")
 
-    # 10. Responde o feedback diretamente dentro do grupo da loja com tom educativo e gamificação
-    msg_whatsapp = analysis.get("mensagem_whatsapp", "")
-    if not msg_whatsapp:
-        msg_whatsapp = (
-            "Audit aprovado! Loja 100% pronta pro pico."
-            if aprovado
-            else f"Atenção: identificado {', '.join(problemas)}. Favor puxar a frente e repor agora."
-        )
-
-    # Complementa a mensagem com o crédito de pontos ou a chamada rápida de identificação
-    if operator_name:
-        operator_line = f"\n\n👤 *Operador(a):* {operator_name} (+{int(audit_points)} pts no ranking!)"
-    else:
-        operator_line = (
-            "\n\n👤 *Quem realizou esta auditoria?* "
-            "Responda a esta mensagem apenas com seu primeiro nome para pontuar no ranking!"
-        )
-
-    # Alerta de bônus por correção em até 20 minutos
-    if itens_corrigiveis:
-        correction_alert = (
-            "\n\n⏱️ *Ciclo de Correção Ativo (+25 pts):*\n"
-            "Corrija os apontamentos acima e envie nova foto deste setor nos próximos *20 minutos* para ganhar *+25 pontos de bônus* no ranking! 🚀"
-        )
-    else:
-        correction_alert = ""
-
-    group_reply = msg_whatsapp + operator_line + correction_alert
-    await evolution_service.send_text_message(store.whatsapp_group_jid, group_reply)
-
-    # 11. Alerta Executivo (Diretoria):
-    has_rupture = any("ruptura" in p.lower() or "vazio" in p.lower() for p in problemas)
-    is_critical_failure = (score < 6.0) or (not aprovado and has_rupture)
-
-    if is_critical_failure:
-        setor_nome = analysis.get("setor", "SETOR OPERACIONAL")
-        logger.warning(
-            f"[Webhook] Falha grave detectada no grupo de {store.name} (Setor: {setor_nome} | Nota: {score}/10). "
-            f"Notificando Diretoria..."
-        )
-        director_msg = (
-            f"🚨 Alerta Operacional Diretoria - {store.name} ({setor_nome}):\n"
-            f"Turno: {shift}\n"
-            f"Nota IA: {score}/10 (REPROVADO)\n"
-            f"Problemas: {', '.join(problemas) if problemas else 'Ruptura ou desorganização grave'}\n"
-            f"Operador: {operator_name or 'Não informado'}\n"
-            f"Grupo: {store.whatsapp_group_jid}\n"
-            f"Gerente Responsável: {store.manager_name} ({store.manager_phone or 'N/A'})\n"
-            f"Status: Equipe orientada no grupo para correção imediata."
-        )
-
-        await evolution_service.send_text_message(settings.DIRECTOR_PHONE, director_msg)
-
-        await save_alert(
-            session=session,
-            store_id=store.id,
-            message=director_msg,
-            sent_to_director=True,
-        )
-
+    task = asyncio.create_task(_pipeline_foto())
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={
-            "status": "success",
-            "store": store.name,
-            "group_jid": store.whatsapp_group_jid,
-            "audit_id": audit_record.id,
-            "shift": shift,
-            "score": score,
-            "points": audit_points,
-            "operator": operator_name,
-            "approved": aprovado,
-            "problemas": problemas,
-            "orientacao": orientacao,
-            "group_feedback_sent": True,
-            "director_alerted": is_critical_failure,
-        },
+        content={"status": "processing", "codigo": codigo_imagem, "store": store.name},
     )
 
 
