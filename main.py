@@ -26,6 +26,7 @@ from database import (
     AuditTicket,
     Operator,
     Store,
+    async_session_factory,
     add_points_to_operator,
     aplicar_correcao_ticket,
     assign_operator_to_audit,
@@ -158,12 +159,15 @@ async def health_check(session: AsyncSession = Depends(get_db_session)):
 
 
 @app.get("/test-group", tags=["WhatsApp & Grupos"])
-async def send_test_message_to_group():
+async def send_test_message_to_group(group_jid: Optional[str] = None):
     """
-    Envia uma mensagem de confirmação/boas-vindas para o grupo de WhatsApp da Loja 1:
-    '120363430718119886@g.us'
+    Envia uma mensagem de confirmação para um grupo (padrão: grupo da Loja 1).
     """
-    target_group = "120363430718119886@g.us"
+    if not group_jid:
+        async with async_session_factory() as _s:
+            _store = await _s.get(Store, 1)
+            group_jid = _store.whatsapp_group_jid if _store else "120363430718119886@g.us"
+    target_group = group_jid
     message = "✅ Bot de Auditoria Conectado e Monitorando este grupo! Podem enviar a foto da auditoria para análise."
     logger.info(f"[Test Group] Enviando mensagem de teste para o grupo {target_group}...")
     success = await evolution_service.send_text_message(target_group, message)
@@ -258,6 +262,56 @@ async def _registrar_webhook_debug(request: Request, call_next):
 async def debug_webhooks():
     """Últimas chamadas recebidas em /webhook/evolution (apenas metadados, sem mídia)."""
     return {"count": len(_WEBHOOK_DEBUG), "items": list(_WEBHOOK_DEBUG)}
+
+
+async def _evo_call(method: str, path: str, json_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    import httpx
+    url = f"{settings.EVOLUTION_API_URL.rstrip('/')}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.request(method, url, headers={"apikey": settings.EVOLUTION_API_KEY}, json=json_body)
+        try:
+            body = r.json()
+        except Exception:
+            body = r.text[:500]
+        return {"http": r.status_code, "body": body}
+    except Exception as e:
+        return {"http": None, "error": repr(e)[:300]}
+
+
+WEBHOOK_INTERNAL_URL = "http://app:8000/webhook/evolution"
+
+
+@app.get("/debug/evolution", tags=["WhatsApp & Webhook"])
+async def debug_evolution():
+    """Estado da instância e configuração de webhook gravada na Evolution (usa a chave do servidor)."""
+    inst = settings.EVOLUTION_INSTANCE_NAME
+    return {
+        "instance": inst,
+        "evolution_url": settings.EVOLUTION_API_URL,
+        "api_key_configured": bool(settings.EVOLUTION_API_KEY),
+        "connection_state": await _evo_call("GET", f"/instance/connectionState/{inst}"),
+        "webhook": await _evo_call("GET", f"/webhook/find/{inst}"),
+    }
+
+
+@app.post("/debug/evolution/fix-webhook", tags=["WhatsApp & Webhook"])
+async def fix_evolution_webhook():
+    """Grava na instância o webhook correto (URL interna, MESSAGES_UPSERT, base64 ligado)."""
+    inst = settings.EVOLUTION_INSTANCE_NAME
+    body = {
+        "webhook": {
+            "enabled": True,
+            "url": WEBHOOK_INTERNAL_URL,
+            "byEvents": False,
+            "base64": True,
+            "events": ["MESSAGES_UPSERT"],
+        }
+    }
+    return {
+        "set": await _evo_call("POST", f"/webhook/set/{inst}", body),
+        "now": await _evo_call("GET", f"/webhook/find/{inst}"),
+    }
 
 
 # ==========================================================
@@ -475,10 +529,23 @@ async def evolution_webhook(
                         },
                     )
 
-        logger.info(f"[Webhook] Postagem no grupo de {store.name} não continha foto válida nem comando operacional.")
+        tipo_msg = (payload.get("data") or {}).get("messageType") if isinstance(payload.get("data"), dict) else None
+        if tipo_msg == "imageMessage":
+            reply = (
+                "🤖 Recebi sua foto, mas não consegui ler a imagem. "
+                "Tente enviar novamente, tirada na hora pela câmera."
+            )
+        else:
+            reply = (
+                "🤖 *Bot de Auditoria ativo!*\n"
+                "📸 Envie uma *foto tirada na hora* do setor para análise.\n"
+                "Comandos: *!ranking* · *!pendencias* · *!justificar [ID] [motivo]*"
+            )
+        logger.info(f"[Webhook] Postagem no grupo de {store.name} sem foto válida/comando. Respondendo ajuda.")
+        sent = await evolution_service.send_text_message(store.whatsapp_group_jid, reply)
         return JSONResponse(
             status_code=status.HTTP_200_OK,
-            content={"status": "received", "reason": "no_actionable_message"},
+            content={"status": "received", "reason": "no_actionable_message", "message_type": tipo_msg, "reply_sent": bool(sent)},
         )
 
     # 6. Identificação de Operador via Legenda da Imagem (se houver)

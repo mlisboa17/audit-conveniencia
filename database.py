@@ -373,14 +373,8 @@ async def init_db() -> None:
             logger.info("3 lojas com grupos cadastradas com sucesso.")
         else:
             updated = False
-            store_1 = next((s for s in existing_stores if s.id == 1 or "Centro" in s.name), None)
-            if store_1 and store_1.whatsapp_group_jid != "120363430718119886@g.us":
-                logger.info(
-                    f"Vinculando Loja 1 ao grupo real: '120363430718119886@g.us' "
-                    f"(anterior: '{store_1.whatsapp_group_jid}')"
-                )
-                store_1.whatsapp_group_jid = "120363430718119886@g.us"
-                updated = True
+            # Não sobrescreve vínculos existentes: o grupo de cada loja é gerido via
+            # PUT /api/stores/{id}/group e precisa persistir entre reinícios.
 
             for idx, s in enumerate(existing_stores, start=1):
                 if not getattr(s, "whatsapp_group_jid", None):
