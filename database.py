@@ -8,7 +8,7 @@ import json
 import logging
 import uuid
 from datetime import date, datetime, timedelta
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 from sqlalchemy import (
     Boolean,
