@@ -34,7 +34,7 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
       - POSTGRES_DB=${POSTGRES_DB:-evolution}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data_v2:/var/lib/postgresql/data
 
   redis:
     image: redis:7-alpine
@@ -43,5 +43,5 @@ services:
       - redis_data:/data
 
 volumes:
-  postgres_data:
+  postgres_data_v2:
   redis_data:
