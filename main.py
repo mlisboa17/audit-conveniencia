@@ -579,6 +579,12 @@ async def evolution_webhook(
             content={"status": "received", "reason": "no_actionable_message", "message_type": tipo_msg, "reply_sent": bool(sent)},
         )
 
+    # 5.5. Aviso imediato de recebimento (a análise pode levar alguns segundos)
+    await evolution_service.send_text_message(
+        store.whatsapp_group_jid,
+        "📸 *Foto recebida!* Analisando... ⏳ Em instantes envio o resultado.",
+    )
+
     # 6. Identificação de Operador via Legenda da Imagem (se houver)
     caption_text = evolution_service.extract_caption(payload)
     operator_name = evolution_service.extract_operator_name_from_text(caption_text)
