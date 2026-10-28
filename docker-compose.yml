@@ -7,6 +7,9 @@ services:
     environment:
       - REDIS_HOST=redis
       - DB_HOST=postgres
+      - DATABASE_URL=sqlite+aiosqlite:////data/app.db
+    volumes:
+      - app_data:/data
     depends_on:
       - postgres
       - redis
@@ -43,5 +46,6 @@ services:
       - redis_data:/data
 
 volumes:
+  app_data:
   postgres_data_v2:
   redis_data:
